@@ -275,6 +275,8 @@ class EventsStream(
     ) -> "EventsStream":
         return filter_class(self, *args, **kwargs)  # type: ignore
 
+    def tee(self, n: int = 2) -> tuple["EventsStream", ...]: ...
+
     def render(
         self,
         decay: enums.Decay,
@@ -354,6 +356,8 @@ class FiniteEventsStream(
         self, filter_class: type["FiniteEventsFilter"], *args, **kwargs
     ) -> "FiniteEventsStream":
         return filter_class(self, *args, **kwargs)  # type: ignore
+
+    def tee(self, n: int = 2) -> tuple["FiniteEventsStream", ...]: ...
 
     def to_array(
         self, on_progress: typing.Callable[[OutputState], None] = lambda _: None
@@ -492,6 +496,8 @@ class RegularEventsStream(
     ) -> "RegularEventsStream":
         return filter_class(self, *args, **kwargs)  # type: ignore
 
+    def tee(self, n: int = 2) -> tuple["RegularEventsStream", ...]: ...
+
     def render(
         self,
         decay: enums.Decay,
@@ -567,6 +573,8 @@ class FiniteRegularEventsStream(
         self, filter_class: type["FiniteRegularEventsFilter"], *args, **kwargs
     ) -> "FiniteRegularEventsStream":
         return filter_class(self, *args, **kwargs)  # type: ignore
+
+    def tee(self, n: int = 2) -> tuple["FiniteRegularEventsStream", ...]: ...
 
     def to_array(
         self, on_progress: typing.Callable[[OutputState], None] = lambda _: None
@@ -818,6 +826,38 @@ def bind(prefix: typing.Literal["", "Finite", "Regular", "FiniteRegular"]):
             gamma=gamma,
         )
 
+    def tee(self, n: int = 2):
+        """
+        Split the stream into n independent streams that can be processed simultaneously.
+
+        Each stream receives a copy of the events, allowing for parallel processing,
+        saving, and viewing operations. Similar to the Unix tee command.
+
+        Args:
+            n: Number of output streams to create (default: 2).
+
+        Returns:
+            A tuple of n EventStream objects, each of which can be processed independently.
+
+        Example:
+            recording, viewing = faery.events_stream_from_camera().tee()
+            recording.to_file("output.aedat4")
+            viewing.render(...).to_file("output.mp4")
+        """
+        from .events_filter import FILTERS, TeeBuffer
+
+        if n < 2:
+            raise ValueError(f"n must be at least 2, got {n}")
+
+        tee_buffer = TeeBuffer(parent=self, num_outputs=n)
+        return tuple(
+            FILTERS[f"{prefix}TeedStream"](
+                tee_buffer=tee_buffer,
+                output_index=i,
+            )
+            for i in range(n)
+        )
+
     regularize.filter_return_annotation = f"{regularize_prefix}EventsStream"
     chunks.filter_return_annotation = f"{unregularize_prefix}EventsStream"
     event_slice.filter_return_annotation = f"{finitize_prefix}EventsStream"
@@ -831,6 +871,7 @@ def bind(prefix: typing.Literal["", "Finite", "Regular", "FiniteRegular"]):
     )
     filter_hot_pixels.filter_return_annotation = f"{prefix}EventsStream"
     map.filter_return_annotation = f"{prefix}EventsStream"
+    tee.filter_return_annotation = f"tuple[{prefix}EventsStream, ...]"
     render.filter_return_annotation = f"{prefix}FrameStream"
 
     globals()[f"{prefix}EventsStream"].regularize = regularize
@@ -846,6 +887,8 @@ def bind(prefix: typing.Literal["", "Finite", "Regular", "FiniteRegular"]):
     ].filter_arbiter_saturation_lines = filter_arbiter_saturation_lines
     globals()[f"{prefix}EventsStream"].filter_hot_pixels = filter_hot_pixels
     globals()[f"{prefix}EventsStream"].map = map
+    globals()[f"{prefix}EventsStream"].tee = tee
+    globals()[f"{prefix}EventsStream"].render = render
     globals()[f"{prefix}EventsStream"].render = render
 
 

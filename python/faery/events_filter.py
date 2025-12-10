@@ -598,3 +598,79 @@ class Map(events_stream.FiniteRegularEventsFilter):
     def __iter__(self) -> collections.abc.Iterator[numpy.ndarray]:
         for events in self.parent:
             yield self.function(events)
+
+
+class TeeBuffer:
+    """Shared buffer for teed streams."""
+
+    def __init__(self, parent: stream.Stream[numpy.ndarray], num_outputs: int):
+        self.parent = parent
+        self.num_outputs = num_outputs
+        self.buffers: list[list[numpy.ndarray]] = [[] for _ in range(num_outputs)]
+        self.parent_iterator: typing.Optional[
+            collections.abc.Iterator[numpy.ndarray]
+        ] = None
+        self.parent_exhausted = False
+        self.lock = None  # For thread safety if needed in the future
+
+    def get_next(self, output_index: int) -> typing.Optional[numpy.ndarray]:
+        """Get the next packet for the given output index."""
+        # If this output already has buffered data, return it
+        if self.buffers[output_index]:
+            return self.buffers[output_index].pop(0)
+
+        # If parent is exhausted, return None
+        if self.parent_exhausted:
+            return None
+
+        # Initialize parent iterator if needed
+        if self.parent_iterator is None:
+            self.parent_iterator = iter(self.parent)
+
+        # Fetch next packet from parent
+        try:
+            events = next(self.parent_iterator)
+            # Make a copy for each output (each output gets its own copy)
+            for i in range(self.num_outputs):
+                if i == output_index:
+                    # Return directly for the requesting output
+                    continue
+                else:
+                    # Buffer for other outputs
+                    self.buffers[i].append(events.copy())
+            return events.copy()
+        except StopIteration:
+            self.parent_exhausted = True
+            return None
+
+
+@typed_filter({"", "Finite", "Regular", "FiniteRegular"})
+class TeedStream(events_stream.FiniteRegularEventsFilter):
+    """A teed stream that shares data with other teed streams."""
+
+    def __init__(
+        self,
+        tee_buffer: TeeBuffer,
+        output_index: int,
+    ):
+        # Don't call self.init() since we're using a shared buffer instead of a parent
+        self.tee_buffer = tee_buffer
+        self.output_index = output_index
+
+    def dimensions(self) -> tuple[int, int]:
+        return self.tee_buffer.parent.dimensions()
+
+    @restrict({"Finite", "FiniteRegular"})
+    def time_range(self) -> tuple[timestamp.Time, timestamp.Time]:
+        return self.tee_buffer.parent.time_range()  # type: ignore
+
+    @restrict({"Regular", "FiniteRegular"})
+    def frequency_hz(self) -> float:
+        return self.tee_buffer.parent.frequency_hz()  # type: ignore
+
+    def __iter__(self) -> collections.abc.Iterator[numpy.ndarray]:
+        while True:
+            events = self.tee_buffer.get_next(self.output_index)
+            if events is None:
+                break
+            yield events
