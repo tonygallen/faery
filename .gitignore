@@ -6,3 +6,4 @@ __pycache__
 *.so
 tests/data_generated
 src/mp4/x264-build
+.venv*
