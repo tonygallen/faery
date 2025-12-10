@@ -601,25 +601,45 @@ class Map(events_stream.FiniteRegularEventsFilter):
 
 
 class TeeBuffer:
-    """Shared buffer for teed streams."""
+    """
+    Shared buffer for teed streams.
+
+    This buffer ensures that all teed streams can consume events independently,
+    even if one stream is fully consumed before another is started. Events are
+    cached until all outputs have consumed them.
+    """
 
     def __init__(self, parent: stream.Stream[numpy.ndarray], num_outputs: int):
         self.parent = parent
         self.num_outputs = num_outputs
-        self.buffers: list[list[numpy.ndarray]] = [[] for _ in range(num_outputs)]
+        # Each buffer stores tuples of (packet_index, events_copy)
+        # to track which packets have been consumed by each output
+        self.buffers: list[list[tuple[int, numpy.ndarray]]] = [
+            [] for _ in range(num_outputs)
+        ]
         self.parent_iterator: typing.Optional[
             collections.abc.Iterator[numpy.ndarray]
         ] = None
         self.parent_exhausted = False
-        self.lock = None  # For thread safety if needed in the future
+        self.next_packet_index = 0  # Track the next packet to fetch from parent
+        self.consumed_indices: list[int] = [
+            -1 for _ in range(num_outputs)
+        ]  # Track last consumed index per output
 
     def get_next(self, output_index: int) -> typing.Optional[numpy.ndarray]:
-        """Get the next packet for the given output index."""
-        # If this output already has buffered data, return it
-        if self.buffers[output_index]:
-            return self.buffers[output_index].pop(0)
+        """
+        Get the next packet for the given output index.
 
-        # If parent is exhausted, return None
+        This method ensures that even if outputs are consumed at different rates
+        or in different orders, each output gets all packets in order.
+        """
+        # Check if this output already has buffered data
+        if self.buffers[output_index]:
+            packet_index, events = self.buffers[output_index].pop(0)
+            self.consumed_indices[output_index] = packet_index
+            return events
+
+        # If parent is exhausted and buffer is empty, we're done
         if self.parent_exhausted:
             return None
 
@@ -627,21 +647,31 @@ class TeeBuffer:
         if self.parent_iterator is None:
             self.parent_iterator = iter(self.parent)
 
-        # Fetch next packet from parent
-        try:
-            events = next(self.parent_iterator)
-            # Make a copy for each output (each output gets its own copy)
-            for i in range(self.num_outputs):
-                if i == output_index:
-                    # Return directly for the requesting output
-                    continue
-                else:
-                    # Buffer for other outputs
-                    self.buffers[i].append(events.copy())
-            return events.copy()
-        except StopIteration:
-            self.parent_exhausted = True
-            return None
+        # Fetch packets from parent until we have one for this output
+        # or parent is exhausted
+        while not self.buffers[output_index] and not self.parent_exhausted:
+            try:
+                events = next(self.parent_iterator)
+                current_packet_index = self.next_packet_index
+                self.next_packet_index += 1
+
+                # Distribute this packet to all outputs that haven't consumed it yet
+                for i in range(self.num_outputs):
+                    # Only buffer for outputs that haven't consumed this packet yet
+                    if self.consumed_indices[i] < current_packet_index:
+                        self.buffers[i].append((current_packet_index, events.copy()))
+
+            except StopIteration:
+                self.parent_exhausted = True
+                break
+
+        # Try to return from buffer again
+        if self.buffers[output_index]:
+            packet_index, events = self.buffers[output_index].pop(0)
+            self.consumed_indices[output_index] = packet_index
+            return events
+
+        return None
 
 
 @typed_filter({"", "Finite", "Regular", "FiniteRegular"})
