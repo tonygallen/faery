@@ -889,7 +889,6 @@ def bind(prefix: typing.Literal["", "Finite", "Regular", "FiniteRegular"]):
     globals()[f"{prefix}EventsStream"].map = map
     globals()[f"{prefix}EventsStream"].tee = tee
     globals()[f"{prefix}EventsStream"].render = render
-    globals()[f"{prefix}EventsStream"].render = render
 
 
 for prefix in ("", "Finite", "Regular", "FiniteRegular"):
