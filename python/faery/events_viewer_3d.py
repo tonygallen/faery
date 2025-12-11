@@ -68,9 +68,14 @@ class EventsViewer3D:
         frame = np.zeros((render_height, render_width, 4), dtype=np.uint8)
         
         colormap_rgba = self.colormap.rgba
-        half_idx = len(colormap_rgba) // 2
-        colormap_off = colormap_rgba[:half_idx]
-        colormap_on = colormap_rgba[half_idx:]
+        
+        if self.colormap.type in ["diverging", "cyclic"]:
+            half_idx = len(colormap_rgba) // 2
+            colormap_off = colormap_rgba[:half_idx]
+            colormap_on = colormap_rgba[half_idx:]
+        else:
+            colormap_off = colormap_rgba
+            colormap_on = colormap_rgba
         
         for event in event_buffer:
             age_us = current_t - event['t']
@@ -92,10 +97,10 @@ class EventsViewer3D:
                 color = colormap[color_idx]
                 
                 frame[screen_y, screen_x] = (
-                    int(color[0] * 255 * alpha + frame[screen_y, screen_x, 0] * (1 - alpha)),
-                    int(color[1] * 255 * alpha + frame[screen_y, screen_x, 1] * (1 - alpha)),
-                    int(color[2] * 255 * alpha + frame[screen_y, screen_x, 2] * (1 - alpha)),
-                    int(color[3] * 255),
+                    min(255, int(color[0] * 255 * alpha + frame[screen_y, screen_x, 0] * (1 - alpha))),
+                    min(255, int(color[1] * 255 * alpha + frame[screen_y, screen_x, 1] * (1 - alpha))),
+                    min(255, int(color[2] * 255 * alpha + frame[screen_y, screen_x, 2] * (1 - alpha))),
+                    min(255, int(color[3] * 255)),
                 )
         
         return frame
