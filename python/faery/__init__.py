@@ -102,6 +102,7 @@ from .timestamp import (
     s as s,
 )
 from .wiggle import WiggleParameters as WiggleParameters
+from .events_viewer_3d import EventsViewer3D as EventsViewer3D
 
 if typing.TYPE_CHECKING:
     from .types import (
@@ -232,6 +233,7 @@ __all__ = [
     "ms",
     "s",
     "WiggleParameters",
+    "EventsViewer3D",
     "aedat",
     "csv",
     "dat",

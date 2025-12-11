@@ -285,6 +285,20 @@ class EventsStream(
         gamma: float = 0.0,
     ) -> frame_stream.FrameStream: ...
 
+    def view_3d(
+        self,
+        time_window_us: int = 1000000,
+        time_slices: int = 50,
+        colormap: typing.Optional[color.Colormap] = None,
+    ) -> "events_viewer_3d.EventsViewer3D":
+        from . import events_viewer_3d
+        return events_viewer_3d.EventsViewer3D(
+            self,
+            time_window_us=time_window_us,
+            time_slices=time_slices,
+            colormap=colormap,
+        )
+
 
 class FiniteEventsStream(
     stream.FiniteStream[numpy.ndarray],
