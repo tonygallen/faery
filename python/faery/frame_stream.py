@@ -1,6 +1,7 @@
 import collections.abc
 import dataclasses
 import pathlib
+import sys
 import time
 import typing
 
@@ -94,6 +95,21 @@ class FrameOutput(typing.Generic[OutputState]):
         """
         # Pass the frame stream and frame rate to Rust
         gui.run_frame_viewer_from_iterator(self, frame_rate)
+
+    def to_stdout_raw(
+        self,
+        on_progress: typing.Callable[[OutputState], None] = lambda _: None,
+    ) -> None:
+        state_manager = frame_stream_state.StateManager(
+            stream=self,
+            on_progress=on_progress,
+        )
+        state_manager.start()
+        for frame in self:
+            sys.stdout.buffer.write(frame.pixels[:, :, :3].tobytes())
+            sys.stdout.buffer.flush()
+            state_manager.commit(frame)
+        state_manager.end()
 
     def to_file(
         self,

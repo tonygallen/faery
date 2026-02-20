@@ -466,6 +466,22 @@ def output_parser(
             )
         else:
             subparser.add_argument("--progress", action="store_true")
+
+        # Output raw RGB frames to stdout
+        subparser = subparsers.add_parser("stdout-raw")
+        if stream_parent_class in {
+            faery.FiniteFrameStream,
+            faery.FiniteRegularFrameStream,
+        }:
+            subparser.add_argument(
+                "--no-progress",
+                action="store_const",
+                const=False,
+                default=True,
+                dest="progress",
+            )
+        else:
+            subparser.add_argument("--progress", action="store_true")
     else:
         raise Exception(f"unsupported stream class {stream_parent_class}")
     return parser
@@ -609,6 +625,8 @@ class StreamWrapper:
             elif output == "view":
                 del args["on_progress"]
                 self.stream.view()
+            elif output == "stdout-raw":
+                self.stream.to_stdout_raw(**args)
             else:
                 raise Exception(f'unknown output type "{output}"')
         else:
