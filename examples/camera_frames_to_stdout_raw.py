@@ -1,3 +1,18 @@
+"""
+Stream raw RGB frames from an event camera to stdout.
+
+On a headless machine (no monitor) you can verify the output is correct by
+piping this script into verify_raw_frames.py:
+
+    python examples/camera_frames_to_stdout_raw.py | \\
+        python examples/verify_raw_frames.py --width 640 --height 480
+
+Replace 640x480 with your camera's actual sensor resolution:
+  Inivation DVXplorer:  640x480
+  Inivation DAVIS346:   346x260
+  Prophesee EVK4:       1280x720
+"""
+
 import faery
 
 (
