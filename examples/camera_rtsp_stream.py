@@ -161,14 +161,13 @@ except (ImportError, ValueError) as _gst_err:
 _SENTINEL = object()
 
 # Number of frames buffered between the faery producer thread and the
-# GStreamer need-data callback.  2 is enough to absorb OS scheduling jitter
-# without accumulating lag.  Larger values allow lag to build up.
-_QUEUE_DEPTH = 2
+# GStreamer push thread.  4 is enough to absorb OS scheduling jitter without
+# accumulating more than ~133 ms of lag at 30 fps.
+_QUEUE_DEPTH = 4
 
-# How long need-data waits for the first frame.  Camera startup (device open,
-# first events arriving) can take a few seconds; 5s gives enough headroom
-# without hanging indefinitely if the camera never starts.
-_CAMERA_STARTUP_TIMEOUT_S = 5.0
+# Short poll interval used by the push loop while waiting for the camera to
+# produce its first frame.  A short value keeps Ctrl-C responsive.
+_PUSH_POLL_S = 0.05
 
 # GLib.timeout_add interval (ms).  GLib's main loop runs in C and doesn't
 # yield to Python between iterations, so SIGINT would never be delivered
@@ -262,7 +261,7 @@ def _build_pipeline(
         # the buffer count (max-size-buffers) is active.  leaky=downstream
         # drops the oldest buffer when the queue is full, preventing the
         # faery producer from stalling if the encoder falls behind.
-        # A small depth of 2 keeps end-to-end latency minimal.
+        # A depth of 4 balances latency against scheduling jitter.
         f"queue max-size-buffers={_QUEUE_DEPTH} max-size-time=0 max-size-bytes=0 "
         f"leaky=downstream ! "
         f"{encoder_chain} ! "
@@ -274,14 +273,16 @@ class _FaeryRtspFactory(GstRtspServer.RTSPMediaFactory):
     """
     RTSP media factory that serves rendered event-camera frames as H.264.
 
-    The factory holds a reference to the shared frame queue.  Each time
-    GstRtspServer creates a new media (once per stream with shared=True),
-    it configures the appsrc element and connects the need-data callback.
+    The factory holds a reference to the shared frame queue and the
+    stop_event from main().  Each time GstRtspServer creates a new media
+    object (once per connection cycle with set_shared=True), it configures
+    the appsrc element and launches a dedicated push thread.
     """
 
     def __init__(
         self,
         frame_queue: queue.Queue,
+        stop_event: threading.Event,
         width: int,
         height: int,
         fps: int,
@@ -290,11 +291,8 @@ class _FaeryRtspFactory(GstRtspServer.RTSPMediaFactory):
     ):
         super().__init__()
         self._queue = frame_queue
+        self._stop_event = stop_event
         self._frame_duration_ns = int(1_000_000_000 / fps)
-        # Guard that prevents starting more than one push thread if
-        # media-configure fires more than once (e.g. if the shared media is
-        # torn down and re-created after all clients disconnect).
-        self._push_started = False
 
         pipeline = _build_pipeline(
             width=width,
@@ -328,7 +326,17 @@ class _FaeryRtspFactory(GstRtspServer.RTSPMediaFactory):
         ``get_element()`` -- ``get_child_by_name()`` only searches direct
         children and would return ``None``, preventing any data from flowing.
         ``get_by_name()`` searches recursively and finds the element correctly.
+
+        The push-started flag is stored on the ``rtsp_media`` object itself
+        (not on the factory) so that it resets when GStreamer destroys the
+        media and creates a new one for the next connection cycle.  A
+        factory-level flag would block new push threads after the first
+        media lifetime ends.
         """
+        if getattr(rtsp_media, "_push_started", False):
+            return
+        setattr(rtsp_media, "_push_started", True)
+
         element = rtsp_media.get_element()
         appsrc = element.get_by_name("src")
         if appsrc is None:
@@ -337,10 +345,7 @@ class _FaeryRtspFactory(GstRtspServer.RTSPMediaFactory):
                 "       Check that the pipeline description contains 'appsrc name=src'.\n"
             )
             return
-        if self._push_started:
-            # Guard against re-entrant calls (e.g. media torn down and rebuilt).
-            return
-        self._push_started = True
+
         push_thread = threading.Thread(
             target=self._push_loop,
             args=(appsrc,),
@@ -355,17 +360,25 @@ class _FaeryRtspFactory(GstRtspServer.RTSPMediaFactory):
         the faery producer and pushes them into the appsrc element.
 
         Using a push thread (rather than the ``need-data`` signal) keeps
-        GStreamer's internal streaming thread free and avoids the 5-second
-        block that ``need-data`` would impose while waiting for the first frame
-        from camera startup.
+        GStreamer's internal streaming thread free and avoids any risk of
+        stalling it while waiting for camera startup.
+
+        The loop polls with a short timeout (_PUSH_POLL_S) rather than a
+        single large timeout.  This means:
+        - The thread can handle arbitrarily long camera startup delays without
+          prematurely emitting end-of-stream.
+        - Ctrl-C (stop_event) causes a clean, responsive shutdown.
+        - ``Gst.FlowReturn.FLUSHING`` from push-buffer (which happens when a
+          client reconnects and the pipeline briefly flushes) is tolerated and
+          the thread keeps running rather than stopping prematurely.
         """
-        while True:
+        while not self._stop_event.is_set():
             try:
-                item = self._queue.get(timeout=_CAMERA_STARTUP_TIMEOUT_S)
+                item = self._queue.get(timeout=_PUSH_POLL_S)
             except queue.Empty:
-                # Camera stopped or startup timed out.
-                appsrc.emit("end-of-stream")
-                return
+                # No frame yet -- keep polling until stop is requested or
+                # the producer enqueues a frame (or SENTINEL).
+                continue
 
             if item is _SENTINEL:
                 appsrc.emit("end-of-stream")
@@ -376,9 +389,15 @@ class _FaeryRtspFactory(GstRtspServer.RTSPMediaFactory):
             buf.pts = pts_ns  # equivalent to gst_buffer_set_pts()
             buf.duration = self._frame_duration_ns
             ret = appsrc.emit("push-buffer", buf)
-            if ret != Gst.FlowReturn.OK:
-                # Pipeline is flushing or in error state — stop pushing.
+            if ret not in (Gst.FlowReturn.OK, Gst.FlowReturn.FLUSHING):
+                # Pipeline is in error state — stop pushing.
+                sys.stderr.write(
+                    f"appsrc push-buffer returned {ret}; stopping push thread.\n"
+                )
                 return
+
+        # stop_event was set — signal end-of-stream and exit.
+        appsrc.emit("end-of-stream")
 
 
 def _faery_producer(
@@ -573,7 +592,7 @@ def main() -> None:
 
     # ------------------------------------------------------------------ #
     # Shared frame queue                                                   #
-    # Depth of 2 absorbs OS scheduling jitter while keeping latency low.  #
+    # Depth of 4 absorbs OS scheduling jitter while keeping latency low.  #
     # _put_latest() ensures the consumer always receives the newest frame  #
     # even when the encoder temporarily falls behind.                      #
     # ------------------------------------------------------------------ #
@@ -607,6 +626,7 @@ def main() -> None:
 
     factory = _FaeryRtspFactory(
         frame_queue=frame_queue,
+        stop_event=stop_event,
         width=width,
         height=height,
         fps=args.fps,
