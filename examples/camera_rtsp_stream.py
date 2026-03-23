@@ -291,6 +291,10 @@ class _FaeryRtspFactory(GstRtspServer.RTSPMediaFactory):
         super().__init__()
         self._queue = frame_queue
         self._frame_duration_ns = int(1_000_000_000 / fps)
+        # Guard that prevents starting more than one push thread if
+        # media-configure fires more than once (e.g. if the shared media is
+        # torn down and re-created after all clients disconnect).
+        self._push_started = False
 
         pipeline = _build_pipeline(
             width=width,
@@ -310,44 +314,71 @@ class _FaeryRtspFactory(GstRtspServer.RTSPMediaFactory):
     # ------------------------------------------------------------------
 
     def _on_media_configure(self, _factory, rtsp_media):
-        """Called once when GstRtspServer builds the pipeline for a new media."""
+        """
+        Called once when GstRtspServer builds the pipeline for a new media
+        (i.e. when the first RTSP client connects).
+
+        Finds the appsrc element and launches a dedicated push thread that
+        feeds frames from the faery queue directly into the GStreamer pipeline.
+
+        Important: ``get_by_name()`` is used here rather than
+        ``get_child_by_name()``.  ``set_launch()`` wraps the entire pipeline
+        description inside an anonymous sub-bin (the ``( )`` in the pipeline
+        string), so ``appsrc`` is a grandchild of the element returned by
+        ``get_element()`` -- ``get_child_by_name()`` only searches direct
+        children and would return ``None``, preventing any data from flowing.
+        ``get_by_name()`` searches recursively and finds the element correctly.
+        """
         element = rtsp_media.get_element()
-        appsrc = element.get_child_by_name("src")
+        appsrc = element.get_by_name("src")
         if appsrc is None:
-            sys.stderr.write("ERROR: could not find appsrc element in pipeline\n")
+            sys.stderr.write(
+                "ERROR: could not find appsrc element 'src' in pipeline.\n"
+                "       Check that the pipeline description contains 'appsrc name=src'.\n"
+            )
             return
-        appsrc.connect("need-data", self._on_need_data)
+        if self._push_started:
+            # Guard against re-entrant calls (e.g. media torn down and rebuilt).
+            return
+        self._push_started = True
+        push_thread = threading.Thread(
+            target=self._push_loop,
+            args=(appsrc,),
+            daemon=True,
+            name="gst-push",
+        )
+        push_thread.start()
 
-    def _on_need_data(self, src, _length):
+    def _push_loop(self, appsrc) -> None:
         """
-        Called by GStreamer (in its streaming thread) whenever appsrc needs
-        more data.  We dequeue one frame and push it with the correct PTS.
+        Runs in a dedicated daemon thread.  Continuously dequeues frames from
+        the faery producer and pushes them into the appsrc element.
 
-        With ``block=true`` on appsrc, this callback MUST either push a buffer
-        or emit end-of-stream before returning.  Returning without doing either
-        leaves GStreamer's internal appsrc queue empty with no pending wake-up,
-        causing the pipeline to stall and clients unable to connect.
-
-        The timeout is 5 s to accommodate camera startup (opening the device,
-        waiting for the first events to arrive).  Once the pipeline is running,
-        frames arrive every ~33 ms at 30 fps so the timeout is never hit.
+        Using a push thread (rather than the ``need-data`` signal) keeps
+        GStreamer's internal streaming thread free and avoids the 5-second
+        block that ``need-data`` would impose while waiting for the first frame
+        from camera startup.
         """
-        try:
-            item = self._queue.get(timeout=_CAMERA_STARTUP_TIMEOUT_S)
-        except queue.Empty:
-            # Camera stopped or pipeline is shutting down.
-            src.emit("end-of-stream")
-            return
+        while True:
+            try:
+                item = self._queue.get(timeout=_CAMERA_STARTUP_TIMEOUT_S)
+            except queue.Empty:
+                # Camera stopped or startup timed out.
+                appsrc.emit("end-of-stream")
+                return
 
-        if item is _SENTINEL:
-            src.emit("end-of-stream")
-            return
+            if item is _SENTINEL:
+                appsrc.emit("end-of-stream")
+                return
 
-        pts_ns, rgb_bytes = item
-        buf = Gst.Buffer.new_wrapped(rgb_bytes)
-        buf.pts = pts_ns  # equivalent to gst_buffer_set_pts()
-        buf.duration = self._frame_duration_ns
-        src.emit("push-buffer", buf)
+            pts_ns, rgb_bytes = item
+            buf = Gst.Buffer.new_wrapped(rgb_bytes)
+            buf.pts = pts_ns  # equivalent to gst_buffer_set_pts()
+            buf.duration = self._frame_duration_ns
+            ret = appsrc.emit("push-buffer", buf)
+            if ret != Gst.FlowReturn.OK:
+                # Pipeline is flushing or in error state — stop pushing.
+                return
 
 
 def _faery_producer(
