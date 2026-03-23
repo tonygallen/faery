@@ -12,7 +12,7 @@ it over TCP at the configured address.
 
             faery thread                     GStreamer streaming thread
         +------------------+               +--------------------------------------+
-        | events_stream_    |               | appsrc (block=false)                 |
+        | events_stream_    |               | appsrc (block=true)                  |
         | from_camera()     |               |  -> leaky queue (max 2 buffers)      |
         | .regularize()     |  queue.Queue  |  -> videoconvert                     |
         | .render()         |-------------->|  -> video/x-raw,format=I420          |
@@ -49,9 +49,16 @@ as RGB (4:4:4), which causes::
 
     x264 [error]: baseline profile doesn't support 4:4:4
 
+``block=true`` on appsrc means that ``push-buffer`` will block if appsrc's
+internal queue is full.  The leaky downstream GStreamer queue ensures that the
+encoder-side never stalls, so this situation is rare in practice.  More
+importantly, ``block=true`` means that the ``need-data`` callback MUST push a
+buffer (or emit end-of-stream) before returning -- returning empty would
+deadlock the pipeline and prevent clients from connecting.
+
 Software encoder pipeline (default)::
 
-    appsrc name=src is-live=true block=false format=time
+    appsrc name=src is-live=true block=true format=time
         caps=video/x-raw,format=RGB,width=W,height=H,framerate=FPS/1 !
     queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream !
     videoconvert !
@@ -63,7 +70,7 @@ Software encoder pipeline (default)::
 
 Hardware encoder pipeline (--hw-encoder, Jetson)::
 
-    appsrc name=src is-live=true block=false format=time
+    appsrc name=src is-live=true block=true format=time
         caps=video/x-raw,format=RGB,width=W,height=H,framerate=FPS/1 !
     queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream !
     videoconvert !
@@ -158,6 +165,16 @@ _SENTINEL = object()
 # without accumulating lag.  Larger values allow lag to build up.
 _QUEUE_DEPTH = 2
 
+# How long need-data waits for the first frame.  Camera startup (device open,
+# first events arriving) can take a few seconds; 5s gives enough headroom
+# without hanging indefinitely if the camera never starts.
+_CAMERA_STARTUP_TIMEOUT_S = 5.0
+
+# GLib.timeout_add interval (ms).  GLib's main loop runs in C and doesn't
+# yield to Python between iterations, so SIGINT would never be delivered
+# without a periodic wake-up.  200 ms is short enough to feel responsive.
+_SIGNAL_HANDLER_POLL_INTERVAL_MS = 200
+
 
 def _put_latest(frame_queue: queue.Queue, item) -> None:
     """
@@ -200,9 +217,11 @@ def _build_pipeline(
 
         x264 [error]: baseline profile doesn't support 4:4:4
 
-    ``block=false`` on appsrc combined with a leaky downstream queue lets
-    GStreamer drop frames under backpressure rather than stalling the faery
-    producer thread.
+    ``block=true`` on appsrc is required so that the ``need-data`` callback
+    contract is respected: GStreamer expects a buffer to be pushed (or
+    end-of-stream to be emitted) before the callback returns.  The leaky
+    downstream queue handles backpressure by dropping old frames rather than
+    stalling the encoder.
     """
     src_caps = (
         f"video/x-raw,format=RGB,"
@@ -237,7 +256,7 @@ def _build_pipeline(
         )
 
     return (
-        f"( appsrc name=src is-live=true block=false format=time "
+        f"( appsrc name=src is-live=true block=true format=time "
         f"caps={src_caps} ! "
         # max-size-time=0 and max-size-bytes=0 disable those limits so only
         # the buffer count (max-size-buffers) is active.  leaky=downstream
@@ -304,16 +323,20 @@ class _FaeryRtspFactory(GstRtspServer.RTSPMediaFactory):
         Called by GStreamer (in its streaming thread) whenever appsrc needs
         more data.  We dequeue one frame and push it with the correct PTS.
 
-        The timeout is deliberately short (100 ms, approximately 3 frame periods
-        at 30 fps).  Blocking this callback for longer would stall GStreamer's
-        streaming thread; a short timeout lets GStreamer call us again almost
-        immediately.
+        With ``block=true`` on appsrc, this callback MUST either push a buffer
+        or emit end-of-stream before returning.  Returning without doing either
+        leaves GStreamer's internal appsrc queue empty with no pending wake-up,
+        causing the pipeline to stall and clients unable to connect.
+
+        The timeout is 5 s to accommodate camera startup (opening the device,
+        waiting for the first events to arrive).  Once the pipeline is running,
+        frames arrive every ~33 ms at 30 fps so the timeout is never hit.
         """
         try:
-            item = self._queue.get(timeout=0.1)
+            item = self._queue.get(timeout=_CAMERA_STARTUP_TIMEOUT_S)
         except queue.Empty:
-            # No frame yet -- return without pushing so GStreamer can
-            # call need-data again on the next cycle.
+            # Camera stopped or pipeline is shutting down.
+            src.emit("end-of-stream")
             return
 
         if item is _SENTINEL:
@@ -592,7 +615,7 @@ def main() -> None:
     # iterations, so SIGINT would never be delivered.  A short periodic
     # timeout forces the loop to yield to the Python interpreter regularly,
     # allowing the signal handler registered above to execute.
-    GLib.timeout_add(200, lambda: True)
+    GLib.timeout_add(_SIGNAL_HANDLER_POLL_INTERVAL_MS, lambda: True)
 
     try:
         loop.run()
