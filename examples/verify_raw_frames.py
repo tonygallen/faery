@@ -5,6 +5,9 @@ Reads raw RGB frames from stdin and prints per-frame statistics to stderr,
 so you can confirm on a headless machine (no monitor) that frames are
 flowing correctly from the event camera pipeline.
 
+Each frame on stdin is preceded by an 8-byte little-endian uint64 PTS in
+nanoseconds (see to_stdout_raw() for the full wire-format description).
+
 Usage
 -----
 Run the camera pipeline in one shell and pipe its stdout into this script:
@@ -25,9 +28,13 @@ Common sensor resolutions
 """
 
 import argparse
+import struct
 import sys
 
 import numpy
+
+_PTS_HEADER_SIZE = 8  # bytes: little-endian uint64 nanoseconds
+_PTS_FORMAT = "<Q"
 
 
 def main() -> None:
@@ -64,7 +71,7 @@ def main() -> None:
 
     sys.stderr.write(
         f"Waiting for {width}x{height} RGB frames "
-        f"({bytes_per_frame} bytes / frame) ...\n"
+        f"({_PTS_HEADER_SIZE} byte PTS header + {bytes_per_frame} bytes / frame) ...\n"
     )
     sys.stderr.flush()
 
@@ -73,12 +80,24 @@ def main() -> None:
 
     try:
         while args.count is None or frame_index < args.count:
-            raw = stdin.read(bytes_per_frame)
+            # Read PTS header (8 bytes)
+            hdr = stdin.read(_PTS_HEADER_SIZE)
+            if len(hdr) == 0:
+                sys.stderr.write("stdin closed — stream ended.\n")
+                break
+            if len(hdr) < _PTS_HEADER_SIZE:
+                sys.stderr.write(
+                    f"Incomplete PTS header: received {len(hdr)} bytes, "
+                    f"expected {_PTS_HEADER_SIZE}.\n"
+                )
+                break
+            (pts_ns,) = struct.unpack(_PTS_FORMAT, hdr)
 
+            # Read RGB payload
+            raw = stdin.read(bytes_per_frame)
             if len(raw) == 0:
                 sys.stderr.write("stdin closed — stream ended.\n")
                 break
-
             if len(raw) < bytes_per_frame:
                 sys.stderr.write(
                     f"Incomplete final frame: received {len(raw)} bytes, "
@@ -94,9 +113,11 @@ def main() -> None:
             mean_g = float(pixels[:, :, 1].mean())
             mean_b = float(pixels[:, :, 2].mean())
             non_black = int((pixels.sum(axis=2) > 0).sum())
+            pts_us = pts_ns / 1000.0
 
             sys.stderr.write(
                 f"Frame {frame_index:5d}  "
+                f"pts = {pts_us:14.0f} µs  "
                 f"mean RGB = ({mean_r:5.1f}, {mean_g:5.1f}, {mean_b:5.1f})  "
                 f"non-black pixels = {non_black:7d} / {width * height}\n"
             )
