@@ -3,7 +3,7 @@ Stream an event camera as a live RTSP H.264 feed using faery + GStreamer.
 
 Architecture
 ------------
-A background thread runs the faery pipeline (camera → regularize → render)
+A background thread runs the faery pipeline (camera -> regularize -> render)
 and pushes (pts_ns, rgb_bytes) tuples onto a thread-safe queue.  The
 GStreamer appsrc element calls the need-data callback, which dequeues one
 frame, stamps the Gst.Buffer with the correct PTS (nanoseconds), and pushes
@@ -11,29 +11,49 @@ it into the H.264 encoder.  GstRtspServer wraps everything in RTSP and serves
 it over TCP at the configured address.
 
             faery thread                     GStreamer streaming thread
-        ┌──────────────────┐               ┌──────────────────────────────────────┐
-        │ events_stream_    │               │ appsrc (block=false)                 │
-        │ from_camera()     │               │  → leaky queue                       │
-        │ .regularize()     │  queue.Queue  │  → videoconvert                      │
-        │ .render()         │──────────────▶│  → video/x-raw,format=I420           │
-        └──────────────────┘               │  → nvvidconv (hw) / passthrough (sw) │
-                                           │  → nvv4l2h264enc / x264enc           │
-                                           │  → h264parse                         │
-                                           │  → rtph264pay → RTSPServer           │
-                                           └──────────────────────────────────────┘
+        +------------------+               +--------------------------------------+
+        | events_stream_    |               | appsrc (block=false)                 |
+        | from_camera()     |               |  -> leaky queue (max 2 buffers)      |
+        | .regularize()     |  queue.Queue  |  -> videoconvert                     |
+        | .render()         |-------------->|  -> video/x-raw,format=I420          |
+        +------------------+  (maxsize=2,   |  -> nvvidconv (hw) / identity (sw)   |
+                               evict-old)   |  -> nvv4l2h264enc / x264enc          |
+                                            |  -> h264parse                        |
+                                            |  -> rtph264pay -> RTSPServer         |
+                                            +--------------------------------------+
+
+Low-latency design
+------------------
+Event cameras can produce highly variable event rates.  During bursts the
+renderer may temporarily produce frames faster than the encoder consumes them.
+With a naive FIFO queue the excess frames pile up, the consumer steadily falls
+further behind, and the lag grows without bound.
+
+To prevent this the queue is operated as a **latest-frame slot**: whenever the
+producer has a new frame and the queue is already full it evicts the oldest
+entry *before* inserting the new one.  This means the consumer always receives
+the freshest available frame; older frames are silently discarded.  A depth of
+2 provides just enough cushion to smooth over OS thread-scheduling jitter
+without introducing perceptible delay.
+
+PTS timestamps are normalised to zero at the first frame so that GStreamer's
+pipeline clock does not need to chase large absolute camera timestamps (event
+cameras accumulate time from power-on, which can be many minutes or hours).
 
 Pipeline details
 ----------------
-The key fix over a naïve `appsrc → videoconvert → x264enc` pipeline is the
-explicit `video/x-raw,format=I420` caps filter after videoconvert.  Without
-it, GStreamer's caps negotiation leaves the format as RGB (4:4:4), which
-causes ``x264 [error]: baseline profile doesn't support 4:4:4``.
+The explicit ``video/x-raw,format=I420`` caps filter after videoconvert is
+required so that GStreamer negotiates I420 (4:2:0) before handing frames to
+the H.264 encoder.  Without it, GStreamer's caps negotiation leaves the format
+as RGB (4:4:4), which causes::
+
+    x264 [error]: baseline profile doesn't support 4:4:4
 
 Software encoder pipeline (default)::
 
     appsrc name=src is-live=true block=false format=time
         caps=video/x-raw,format=RGB,width=W,height=H,framerate=FPS/1 !
-    queue max-size-buffers=10 leaky=downstream !
+    queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream !
     videoconvert !
     video/x-raw,format=I420 !
     x264enc tune=zerolatency speed-preset=ultrafast !
@@ -45,7 +65,7 @@ Hardware encoder pipeline (--hw-encoder, Jetson)::
 
     appsrc name=src is-live=true block=false format=time
         caps=video/x-raw,format=RGB,width=W,height=H,framerate=FPS/1 !
-    queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 leaky=downstream !
+    queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream !
     videoconvert !
     video/x-raw,format=I420 !
     nvvidconv !
@@ -68,11 +88,11 @@ Then connect any standard player:
 Options
 -------
   --host HOST        IP address for the RTSP server to listen on
-                     (default: 0.0.0.0 — all interfaces)
+                     (default: 0.0.0.0 -- all interfaces)
   --port PORT        TCP port for the RTSP server (default: 8554)
   --mount MOUNT      RTSP mount point, e.g. /stream (default: /stream)
   --fps FPS          Render frame rate in Hz (default: 30)
-  --tau TAU          Exponential decay time constant, hh:mm:ss.µµµµµµ
+  --tau TAU          Exponential decay time constant, hh:mm:ss.uuuuuu
                      (default: 00:00:00.100000)
   --colormap NAME    Faery colormap name (default: starry_night)
   --width W          Frame width in pixels; auto-detected if omitted
@@ -95,13 +115,13 @@ Install once on Ubuntu / Jetson:
 
 For the hardware encoder path (--hw-encoder), GStreamer Jetson packages
 (libgstreamer-plugins-nvvidconv, gstreamer1.0-nvvidconv, etc.) must be
-installed — these are pre-installed on Jetson JetPack images.
+installed -- these are pre-installed on Jetson JetPack images.
 
 Common sensor resolutions
 -------------------------
-  Inivation DVXplorer:  640 × 480
-  Inivation DAVIS346:   346 × 260
-  Prophesee EVK4:       1280 × 720
+  Inivation DVXplorer:  640 x 480
+  Inivation DAVIS346:   346 x 260
+  Prophesee EVK4:       1280 x 720
 """
 
 import argparse
@@ -133,6 +153,35 @@ except (ImportError, ValueError) as _gst_err:
 # Sentinel pushed onto the queue to signal end-of-stream.
 _SENTINEL = object()
 
+# Number of frames buffered between the faery producer thread and the
+# GStreamer need-data callback.  2 is enough to absorb OS scheduling jitter
+# without accumulating lag.  Larger values allow lag to build up.
+_QUEUE_DEPTH = 2
+
+
+def _put_latest(frame_queue: queue.Queue, item) -> None:
+    """
+    Insert *item* into *frame_queue*, evicting the oldest entry first if the
+    queue is already full.
+
+    This is the core mechanism that prevents growing lag: the consumer always
+    receives the most recent frame rather than a stale one that was rendered
+    seconds ago.  When the encoder temporarily falls behind (e.g. during a
+    burst of events) old frames are silently discarded instead of piling up.
+    """
+    while True:
+        try:
+            frame_queue.put_nowait(item)
+            return
+        except queue.Full:
+            # Evict the oldest entry to make room for the latest frame.
+            try:
+                frame_queue.get_nowait()
+            except queue.Empty:
+                # A consumer thread grabbed it between our Full and get_nowait.
+                # The slot is now free; loop back and try put_nowait again.
+                pass
+
 
 def _build_pipeline(
     width: int,
@@ -163,7 +212,7 @@ def _build_pipeline(
 
     if use_hw_encoder:
         # Jetson hardware path:
-        #   videoconvert → I420 → nvvidconv (NVMM) → nvv4l2h264enc
+        #   videoconvert -> I420 -> nvvidconv (NVMM) -> nvv4l2h264enc
         # nvvidconv moves data to NVMM memory so nvv4l2h264enc can access it
         # without a CPU round-trip.
         encoder_chain = (
@@ -177,7 +226,7 @@ def _build_pipeline(
             f"video/x-h264,alignment=au,stream-format=byte-stream"
         )
     else:
-        # Software path: videoconvert → I420 → x264enc
+        # Software path: videoconvert -> I420 -> x264enc
         # The explicit I420 caps filter prevents the baseline-profile 4:4:4 error.
         encoder_chain = (
             f"videoconvert ! "
@@ -194,7 +243,8 @@ def _build_pipeline(
         # the buffer count (max-size-buffers) is active.  leaky=downstream
         # drops the oldest buffer when the queue is full, preventing the
         # faery producer from stalling if the encoder falls behind.
-        f"queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 "
+        # A small depth of 2 keeps end-to-end latency minimal.
+        f"queue max-size-buffers={_QUEUE_DEPTH} max-size-time=0 max-size-bytes=0 "
         f"leaky=downstream ! "
         f"{encoder_chain} ! "
         f"rtph264pay name=pay0 pt=96 )"
@@ -253,12 +303,17 @@ class _FaeryRtspFactory(GstRtspServer.RTSPMediaFactory):
         """
         Called by GStreamer (in its streaming thread) whenever appsrc needs
         more data.  We dequeue one frame and push it with the correct PTS.
+
+        The timeout is deliberately short (100 ms, approximately 3 frame periods
+        at 30 fps).  Blocking this callback for longer would stall GStreamer's
+        streaming thread; a short timeout lets GStreamer call us again almost
+        immediately.
         """
         try:
-            item = self._queue.get(timeout=2.0)
+            item = self._queue.get(timeout=0.1)
         except queue.Empty:
-            # No frame arrived within 2 s; signal end-of-stream.
-            src.emit("end-of-stream")
+            # No frame yet -- return without pushing so GStreamer can
+            # call need-data again on the next cycle.
             return
 
         if item is _SENTINEL:
@@ -281,8 +336,17 @@ def _faery_producer(
     stop_event: threading.Event,
 ) -> None:
     """
-    Runs the faery camera → regularize → render pipeline in a background
+    Runs the faery camera -> regularize -> render pipeline in a background
     thread and pushes (pts_ns, rgb_bytes) tuples onto frame_queue.
+
+    Uses _put_latest() so that the consumer always receives the most recent
+    frame.  When the encoder temporarily falls behind (e.g. during a burst of
+    camera events) old frames are evicted instead of queued, preventing the
+    lag from growing without bound.
+
+    PTS values are relative to the first frame (camera timestamps start from
+    power-on; using absolute values would force GStreamer to buffer frames
+    until its internal clock caught up to those large timestamps).
 
     Pushes _SENTINEL when the stream ends or stop_event is set.
     """
@@ -305,19 +369,25 @@ def _faery_producer(
                 colormap=colormap,
             )
         )
+        pts_offset_us = None
         for frame in rendered:
             if stop_event.is_set():
                 break
-            # frame.t is in microseconds; GStreamer expects nanoseconds.
-            pts_ns = frame.t.microseconds * 1000
+            # Normalise PTS to start at zero on the first frame.
+            # Camera timestamps accumulate from power-on (can be many minutes).
+            # Feeding those absolute values directly to GStreamer forces it to
+            # buffer frames until its internal clock advances to match, adding
+            # unnecessary latency.
+            if pts_offset_us is None:
+                pts_offset_us = frame.t.microseconds
+            pts_ns = (frame.t.microseconds - pts_offset_us) * 1000
+
             rgb_bytes = frame.pixels[:, :, :3].tobytes()
-            # appsrc uses block=false with a leaky queue, so put() must not
-            # block here — use a short timeout and skip the frame on overflow
-            # rather than stalling the producer indefinitely.
-            try:
-                frame_queue.put((pts_ns, rgb_bytes), timeout=0.5)
-            except queue.Full:
-                pass  # leaky queue in GStreamer will drop; skip here too
+
+            # _put_latest evicts the oldest queued frame when the queue is
+            # full, ensuring the consumer always gets the freshest frame and
+            # lag cannot accumulate during event-rate bursts.
+            _put_latest(frame_queue, (pts_ns, rgb_bytes))
     except Exception as exc:
         sys.stderr.write(f"Faery producer error: {exc}\n")
     finally:
@@ -366,7 +436,7 @@ def main() -> None:
     parser.add_argument(
         "--tau",
         default="00:00:00.100000",
-        help="Exponential decay time constant (timecode hh:mm:ss.µµµµµµ)",
+        help="Exponential decay time constant (timecode hh:mm:ss.uuuuuu)",
     )
     parser.add_argument(
         "--colormap",
@@ -449,11 +519,11 @@ def main() -> None:
 
     # ------------------------------------------------------------------ #
     # Shared frame queue                                                   #
-    # appsrc uses block=false with a leaky downstream queue inside        #
-    # GStreamer, so the Python-side queue just needs to be large enough   #
-    # to smooth over thread scheduling jitter.                            #
+    # Depth of 2 absorbs OS scheduling jitter while keeping latency low.  #
+    # _put_latest() ensures the consumer always receives the newest frame  #
+    # even when the encoder temporarily falls behind.                      #
     # ------------------------------------------------------------------ #
-    frame_queue: queue.Queue = queue.Queue(maxsize=10)
+    frame_queue: queue.Queue = queue.Queue(maxsize=_QUEUE_DEPTH)
     stop_event = threading.Event()
 
     # ------------------------------------------------------------------ #
