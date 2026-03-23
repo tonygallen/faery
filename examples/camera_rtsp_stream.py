@@ -11,12 +11,49 @@ it into the H.264 encoder.  GstRtspServer wraps everything in RTSP and serves
 it over TCP at the configured address.
 
             faery thread                     GStreamer streaming thread
-        ┌──────────────────┐               ┌──────────────────────────────┐
-        │ events_stream_    │               │ appsrc → videoconvert →       │
-        │ from_camera()     │               │ x264enc / nvv4l2h264enc →     │
-        │ .regularize()     │  queue.Queue  │ rtph264pay → RTSPServer       │
-        │ .render()         │──────────────▶│ (need-data callback sets PTS) │
-        └──────────────────┘               └──────────────────────────────┘
+        ┌──────────────────┐               ┌──────────────────────────────────────┐
+        │ events_stream_    │               │ appsrc (block=false)                 │
+        │ from_camera()     │               │  → leaky queue                       │
+        │ .regularize()     │  queue.Queue  │  → videoconvert                      │
+        │ .render()         │──────────────▶│  → video/x-raw,format=I420           │
+        └──────────────────┘               │  → nvvidconv (hw) / passthrough (sw) │
+                                           │  → nvv4l2h264enc / x264enc           │
+                                           │  → h264parse                         │
+                                           │  → rtph264pay → RTSPServer           │
+                                           └──────────────────────────────────────┘
+
+Pipeline details
+----------------
+The key fix over a naïve `appsrc → videoconvert → x264enc` pipeline is the
+explicit `video/x-raw,format=I420` caps filter after videoconvert.  Without
+it, GStreamer's caps negotiation leaves the format as RGB (4:4:4), which
+causes ``x264 [error]: baseline profile doesn't support 4:4:4``.
+
+Software encoder pipeline (default)::
+
+    appsrc name=src is-live=true block=false format=time
+        caps=video/x-raw,format=RGB,width=W,height=H,framerate=FPS/1 !
+    queue max-size-buffers=10 leaky=downstream !
+    videoconvert !
+    video/x-raw,format=I420 !
+    x264enc tune=zerolatency speed-preset=ultrafast !
+    h264parse !
+    video/x-h264,alignment=au,stream-format=byte-stream !
+    rtph264pay name=pay0 pt=96
+
+Hardware encoder pipeline (--hw-encoder, Jetson)::
+
+    appsrc name=src is-live=true block=false format=time
+        caps=video/x-raw,format=RGB,width=W,height=H,framerate=FPS/1 !
+    queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 leaky=downstream !
+    videoconvert !
+    video/x-raw,format=I420 !
+    nvvidconv !
+    video/x-raw(memory:NVMM),format=I420,framerate=FPS/1 !
+    nvv4l2h264enc bitrate=BITRATE profile=0 preset-level=2 maxperf-enable=true !
+    h264parse !
+    video/x-h264,alignment=au,stream-format=byte-stream !
+    rtph264pay name=pay0 pt=96
 
 Usage
 -----
@@ -42,6 +79,8 @@ Options
   --height H         Frame height in pixels; auto-detected if omitted
   --hw-encoder       Use the Jetson hardware H.264 encoder (nvv4l2h264enc)
                      instead of the software encoder (x264enc)
+  --bitrate BPS      Target bitrate in bits/s for the hw encoder
+                     (default: 20000000 = 20 Mbit/s)
   --driver DRIVER    Camera driver: Auto | EventCameraDrivers |
                      NeuromorphicDrivers (default: Auto)
 
@@ -53,6 +92,10 @@ Install once on Ubuntu / Jetson:
                      gstreamer1.0-rtsp gstreamer1.0-plugins-good \\
                      gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad \\
                      gstreamer1.0-plugins-base gstreamer1.0-tools
+
+For the hardware encoder path (--hw-encoder), GStreamer Jetson packages
+(libgstreamer-plugins-nvvidconv, gstreamer1.0-nvvidconv, etc.) must be
+installed — these are pre-installed on Jetson JetPack images.
 
 Common sensor resolutions
 -------------------------
@@ -91,6 +134,73 @@ except (ImportError, ValueError) as _gst_err:
 _SENTINEL = object()
 
 
+def _build_pipeline(
+    width: int,
+    height: int,
+    fps: int,
+    use_hw_encoder: bool,
+    bitrate: int,
+) -> str:
+    """
+    Return the GStreamer pipeline description string for the RTSP factory.
+
+    The explicit ``video/x-raw,format=I420`` caps filter after videoconvert is
+    required so that GStreamer negotiates I420 (4:2:0) before handing frames to
+    the H.264 encoder.  Without it, the encoder receives RGB (4:4:4) and
+    baseline H.264 rejects it with::
+
+        x264 [error]: baseline profile doesn't support 4:4:4
+
+    ``block=false`` on appsrc combined with a leaky downstream queue lets
+    GStreamer drop frames under backpressure rather than stalling the faery
+    producer thread.
+    """
+    src_caps = (
+        f"video/x-raw,format=RGB,"
+        f"width={width},height={height},"
+        f"framerate={fps}/1"
+    )
+
+    if use_hw_encoder:
+        # Jetson hardware path:
+        #   videoconvert → I420 → nvvidconv (NVMM) → nvv4l2h264enc
+        # nvvidconv moves data to NVMM memory so nvv4l2h264enc can access it
+        # without a CPU round-trip.
+        encoder_chain = (
+            f"videoconvert ! "
+            f"video/x-raw,format=I420 ! "
+            f"nvvidconv ! "
+            f"video/x-raw(memory:NVMM),format=I420,framerate={fps}/1 ! "
+            f"nvv4l2h264enc "
+            f"bitrate={bitrate} profile=0 preset-level=2 maxperf-enable=true ! "
+            f"h264parse ! "
+            f"video/x-h264,alignment=au,stream-format=byte-stream"
+        )
+    else:
+        # Software path: videoconvert → I420 → x264enc
+        # The explicit I420 caps filter prevents the baseline-profile 4:4:4 error.
+        encoder_chain = (
+            f"videoconvert ! "
+            f"video/x-raw,format=I420 ! "
+            f"x264enc tune=zerolatency speed-preset=ultrafast ! "
+            f"h264parse ! "
+            f"video/x-h264,alignment=au,stream-format=byte-stream"
+        )
+
+    return (
+        f"( appsrc name=src is-live=true block=false format=time "
+        f"caps={src_caps} ! "
+        # max-size-time=0 and max-size-bytes=0 disable those limits so only
+        # the buffer count (max-size-buffers) is active.  leaky=downstream
+        # drops the oldest buffer when the queue is full, preventing the
+        # faery producer from stalling if the encoder falls behind.
+        f"queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 "
+        f"leaky=downstream ! "
+        f"{encoder_chain} ! "
+        f"rtph264pay name=pay0 pt=96 )"
+    )
+
+
 class _FaeryRtspFactory(GstRtspServer.RTSPMediaFactory):
     """
     RTSP media factory that serves rendered event-camera frames as H.264.
@@ -107,30 +217,18 @@ class _FaeryRtspFactory(GstRtspServer.RTSPMediaFactory):
         height: int,
         fps: int,
         use_hw_encoder: bool,
+        bitrate: int,
     ):
         super().__init__()
         self._queue = frame_queue
-        self._width = width
-        self._height = height
-        self._fps = fps
         self._frame_duration_ns = int(1_000_000_000 / fps)
 
-        encoder = (
-            "nvv4l2h264enc maxperf-enable=1"
-            if use_hw_encoder
-            else "x264enc tune=zerolatency speed-preset=ultrafast"
-        )
-        caps = (
-            f"video/x-raw,format=RGB,"
-            f"width={width},height={height},"
-            f"framerate={fps}/1"
-        )
-        pipeline = (
-            f"( appsrc name=src is-live=true block=true format=time "
-            f"caps={caps} ! "
-            f"videoconvert ! "
-            f"{encoder} ! "
-            f"rtph264pay name=pay0 pt=96 )"
+        pipeline = _build_pipeline(
+            width=width,
+            height=height,
+            fps=fps,
+            use_hw_encoder=use_hw_encoder,
+            bitrate=bitrate,
         )
         self.set_launch(pipeline)
         # Share the single pipeline among all connected clients so we only
@@ -213,10 +311,13 @@ def _faery_producer(
             # frame.t is in microseconds; GStreamer expects nanoseconds.
             pts_ns = frame.t.microseconds * 1000
             rgb_bytes = frame.pixels[:, :, :3].tobytes()
-            # block=True on appsrc provides natural backpressure: put() will
-            # block here if the GStreamer pipeline is running behind, which
-            # prevents the queue from growing without bound.
-            frame_queue.put((pts_ns, rgb_bytes))
+            # appsrc uses block=false with a leaky queue, so put() must not
+            # block here — use a short timeout and skip the frame on overflow
+            # rather than stalling the producer indefinitely.
+            try:
+                frame_queue.put((pts_ns, rgb_bytes), timeout=0.5)
+            except queue.Full:
+                pass  # leaky queue in GStreamer will drop; skip here too
     except Exception as exc:
         sys.stderr.write(f"Faery producer error: {exc}\n")
     finally:
@@ -297,8 +398,17 @@ def main() -> None:
         "--hw-encoder",
         action="store_true",
         help=(
-            "Use the Jetson hardware H.264 encoder (nvv4l2h264enc). "
+            "Use the Jetson hardware H.264 encoder (nvv4l2h264enc) via nvvidconv. "
             "Omit to use the software encoder (x264enc)."
+        ),
+    )
+    parser.add_argument(
+        "--bitrate",
+        type=int,
+        default=20_000_000,
+        help=(
+            "Target bitrate in bits/s for the hardware encoder (--hw-encoder). "
+            "Ignored for the software encoder."
         ),
     )
     parser.add_argument(
@@ -314,7 +424,17 @@ def main() -> None:
     # ------------------------------------------------------------------ #
     if args.width is None or args.height is None:
         sys.stderr.write("Auto-detecting camera sensor dimensions...\n")
-        detected_w, detected_h = _detect_dimensions(args.driver)
+        try:
+            detected_w, detected_h = _detect_dimensions(args.driver)
+        except Exception as exc:
+            sys.stderr.write(
+                f"ERROR: Could not detect camera sensor dimensions: {exc}\n"
+                "Please supply --width and --height explicitly, e.g.:\n"
+                "  --width 640 --height 480   (Inivation DVXplorer)\n"
+                "  --width 346 --height 260   (Inivation DAVIS346)\n"
+                "  --width 1280 --height 720  (Prophesee EVK4)\n"
+            )
+            sys.exit(1)
         width = args.width if args.width is not None else detected_w
         height = args.height if args.height is not None else detected_h
         sys.stderr.write(f"  Detected: {width} x {height}\n\n")
@@ -328,9 +448,12 @@ def main() -> None:
     Gst.init(None)
 
     # ------------------------------------------------------------------ #
-    # Shared frame queue (small — we want low latency, not buffering)      #
+    # Shared frame queue                                                   #
+    # appsrc uses block=false with a leaky downstream queue inside        #
+    # GStreamer, so the Python-side queue just needs to be large enough   #
+    # to smooth over thread scheduling jitter.                            #
     # ------------------------------------------------------------------ #
-    frame_queue: queue.Queue = queue.Queue(maxsize=4)
+    frame_queue: queue.Queue = queue.Queue(maxsize=10)
     stop_event = threading.Event()
 
     # ------------------------------------------------------------------ #
@@ -364,6 +487,7 @@ def main() -> None:
         height=height,
         fps=args.fps,
         use_hw_encoder=args.hw_encoder,
+        bitrate=args.bitrate,
     )
     server.get_mount_points().add_factory(args.mount, factory)
     server.attach(None)
@@ -394,6 +518,10 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _shutdown)
 
     # Keep Python's signal handler alive while blocked inside loop.run().
+    # GLib's main loop runs in C and doesn't return to Python between
+    # iterations, so SIGINT would never be delivered.  A short periodic
+    # timeout forces the loop to yield to the Python interpreter regularly,
+    # allowing the signal handler registered above to execute.
     GLib.timeout_add(200, lambda: True)
 
     try:
