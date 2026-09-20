@@ -1,5 +1,7 @@
 import collections.abc
 import pathlib
+import queue
+import threading
 import typing
 
 import numpy
@@ -270,6 +272,29 @@ class EventsStream(
         function: collections.abc.Callable[[numpy.ndarray], numpy.ndarray],
     ) -> "EventsStream": ...
 
+    def tee(
+        self,
+        n: int = 2,
+        maxsize: int = 100,
+    ) -> list["EventsStream"]:
+        """
+        Split the stream into n independent streams.
+
+        Each output stream receives a copy of every events packet.
+        Works with infinite streams (e.g., cameras).
+
+        The streams are consumed by a background thread. Each consumer
+        should run in its own thread.
+
+        Args:
+            n: Number of output streams to create. Defaults to 2.
+            maxsize: Maximum queue size per consumer. Blocks producer if full. Defaults to 100.
+
+        Returns:
+            List of n stream objects that can be iterated independently.
+        """
+        return _tee(self, n=n, maxsize=maxsize)
+
     def apply(
         self, filter_class: type["EventsFilter"], *args, **kwargs
     ) -> "EventsStream":
@@ -349,6 +374,28 @@ class FiniteEventsStream(
         self,
         function: collections.abc.Callable[[numpy.ndarray], numpy.ndarray],
     ) -> "FiniteEventsStream": ...
+
+    def tee(
+        self,
+        n: int = 2,
+        maxsize: int = 100,
+    ) -> list["FiniteEventsStream"]:
+        """
+        Split the stream into n independent streams.
+
+        Each output stream receives a copy of every events packet.
+
+        The streams are consumed by a background thread. Each consumer
+        should run in its own thread.
+
+        Args:
+            n: Number of output streams to create. Defaults to 2.
+            maxsize: Maximum queue size per consumer. Blocks producer if full. Defaults to 100.
+
+        Returns:
+            List of n stream objects that can be iterated independently.
+        """
+        return _tee(self, n=n, maxsize=maxsize)
 
     def apply(
         self, filter_class: type["FiniteEventsFilter"], *args, **kwargs
@@ -487,6 +534,29 @@ class RegularEventsStream(
         function: collections.abc.Callable[[numpy.ndarray], numpy.ndarray],
     ) -> "RegularEventsStream": ...
 
+    def tee(
+        self,
+        n: int = 2,
+        maxsize: int = 100,
+    ) -> list["RegularEventsStream"]:
+        """
+        Split the stream into n independent streams.
+
+        Each output stream receives a copy of every events packet.
+        Works with infinite streams (e.g., cameras).
+
+        The streams are consumed by a background thread. Each consumer
+        should run in its own thread.
+
+        Args:
+            n: Number of output streams to create. Defaults to 2.
+            maxsize: Maximum queue size per consumer. Blocks producer if full. Defaults to 100.
+
+        Returns:
+            List of n stream objects that can be iterated independently.
+        """
+        return _tee(self, n=n, maxsize=maxsize)
+
     def apply(
         self, filter_class: type["RegularEventsFilter"], *args, **kwargs
     ) -> "RegularEventsStream":
@@ -563,6 +633,28 @@ class FiniteRegularEventsStream(
         function: collections.abc.Callable[[numpy.ndarray], numpy.ndarray],
     ) -> "FiniteRegularEventsStream": ...
 
+    def tee(
+        self,
+        n: int = 2,
+        maxsize: int = 100,
+    ) -> list["FiniteRegularEventsStream"]:
+        """
+        Split the stream into n independent streams.
+
+        Each output stream receives a copy of every events packet.
+
+        The streams are consumed by a background thread. Each consumer
+        should run in its own thread.
+
+        Args:
+            n: Number of output streams to create. Defaults to 2.
+            maxsize: Maximum queue size per consumer. Blocks producer if full. Defaults to 100.
+
+        Returns:
+            List of n stream objects that can be iterated independently.
+        """
+        return _tee(self, n=n, maxsize=maxsize)
+
     def apply(
         self, filter_class: type["FiniteRegularEventsFilter"], *args, **kwargs
     ) -> "FiniteRegularEventsStream":
@@ -590,7 +682,7 @@ class FiniteRegularEventsStream(
         self,
         decay: enums.Decay,
         tau: timestamp.TimeOrTimecode,
-        colormap: color.Colormap,
+        colormap: color.Colormap, #  TODO: This should have a default imo
         minimum_clip: float = 0.0,
         maximum_clip: float = 0.99,
         gamma: float = 0.0,
@@ -901,3 +993,184 @@ class FiniteRegularEventsFilter(
     stream.FiniteRegularFilter[numpy.ndarray],
 ):
     pass
+
+
+class _TeedEventsStream(EventsStream):
+    """A teed stream that receives events from a queue."""
+
+    def __init__(
+        self,
+        q: queue.Queue[typing.Optional[numpy.ndarray]],
+        inner_dimensions: tuple[int, int],
+    ):
+        self._queue = q
+        self._dimensions = inner_dimensions
+
+    def __iter__(self) -> collections.abc.Iterator[numpy.ndarray]:
+        while True:
+            events = self._queue.get()
+            if events is None:
+                break
+            yield events
+
+    def dimensions(self) -> tuple[int, int]:
+        return self._dimensions
+
+
+class _TeedFiniteEventsStream(FiniteEventsStream):
+    """A teed stream that receives events from a queue."""
+
+    def __init__(
+        self,
+        q: queue.Queue[typing.Optional[numpy.ndarray]],
+        inner_dimensions: tuple[int, int],
+        inner_time_range: tuple[timestamp.Time, timestamp.Time],
+    ):
+        self._queue = q
+        self._dimensions = inner_dimensions
+        self._time_range = inner_time_range
+
+    def __iter__(self) -> collections.abc.Iterator[numpy.ndarray]:
+        while True:
+            events = self._queue.get()
+            if events is None:
+                break
+            yield events
+
+    def dimensions(self) -> tuple[int, int]:
+        return self._dimensions
+
+    def time_range(self) -> tuple[timestamp.Time, timestamp.Time]:
+        return self._time_range
+
+
+class _TeedRegularEventsStream(RegularEventsStream):
+    """A teed stream that receives events from a queue."""
+
+    def __init__(
+        self,
+        q: queue.Queue[typing.Optional[numpy.ndarray]],
+        inner_dimensions: tuple[int, int],
+        inner_frequency_hz: float,
+    ):
+        self._queue = q
+        self._dimensions = inner_dimensions
+        self._frequency_hz = inner_frequency_hz
+
+    def __iter__(self) -> collections.abc.Iterator[numpy.ndarray]:
+        while True:
+            events = self._queue.get()
+            if events is None:
+                break
+            yield events
+
+    def dimensions(self) -> tuple[int, int]:
+        return self._dimensions
+
+    def frequency_hz(self) -> float:
+        return self._frequency_hz
+
+
+class _TeedFiniteRegularEventsStream(FiniteRegularEventsStream):
+    """A teed stream that receives events from a queue."""
+
+    def __init__(
+        self,
+        q: queue.Queue[typing.Optional[numpy.ndarray]],
+        inner_dimensions: tuple[int, int],
+        inner_time_range: tuple[timestamp.Time, timestamp.Time],
+        inner_frequency_hz: float,
+    ):
+        self._queue = q
+        self._dimensions = inner_dimensions
+        self._time_range = inner_time_range
+        self._frequency_hz = inner_frequency_hz
+
+    def __iter__(self) -> collections.abc.Iterator[numpy.ndarray]:
+        while True:
+            events = self._queue.get()
+            if events is None:
+                break
+            yield events
+
+    def dimensions(self) -> tuple[int, int]:
+        return self._dimensions
+
+    def time_range(self) -> tuple[timestamp.Time, timestamp.Time]:
+        return self._time_range
+
+    def frequency_hz(self) -> float:
+        return self._frequency_hz
+
+
+StreamType = typing.TypeVar(
+    "StreamType",
+    EventsStream,
+    FiniteEventsStream,
+    RegularEventsStream,
+    FiniteRegularEventsStream,
+)
+
+
+def _tee(
+    parent: StreamType,
+    n: int,
+    maxsize: int,
+) -> list[StreamType]:
+    """
+    Internal implementation of stream tee.
+    """
+    queues: list[queue.Queue[typing.Optional[numpy.ndarray]]] = [
+        queue.Queue(maxsize=maxsize) for _ in range(n)
+    ]
+    inner_dimensions = parent.dimensions()
+
+    def producer():
+        try:
+            for events in parent:
+                for q in queues:
+                    q.put(events.copy())
+        finally:
+            for q in queues:
+                q.put(None)
+
+    thread = threading.Thread(target=producer, daemon=True)
+    thread.start()
+
+    if isinstance(parent, FiniteRegularEventsStream):
+        return [
+            _TeedFiniteRegularEventsStream(
+                q=q,
+                inner_dimensions=inner_dimensions,
+                inner_time_range=parent.time_range(),
+                inner_frequency_hz=parent.frequency_hz(),
+            )
+            for q in queues
+        ]  # type: ignore
+    elif isinstance(parent, RegularEventsStream):
+        return [
+            _TeedRegularEventsStream(
+                q=q,
+                inner_dimensions=inner_dimensions,
+                inner_frequency_hz=parent.frequency_hz(),
+            )
+            for q in queues
+        ]  # type: ignore
+    elif isinstance(parent, FiniteEventsStream):
+        return [
+            _TeedFiniteEventsStream(
+                q=q,
+                inner_dimensions=inner_dimensions,
+                inner_time_range=parent.time_range(),
+            )
+            for q in queues
+        ]  # type: ignore
+    else:
+        return [
+            _TeedEventsStream(
+                q=q,
+                inner_dimensions=inner_dimensions,
+            )
+            for q in queues
+        ]  # type: ignore
+

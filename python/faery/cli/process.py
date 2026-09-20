@@ -381,7 +381,7 @@ def output_parser(
             help="(default: %(default)s)",
         )
         subparser.add_argument(
-            "--quality-factor",
+            "--quality",
             type=list_filters.parse_optional_float,
             default="none",
             help="(default: %(default)s)",
@@ -442,7 +442,7 @@ def output_parser(
             help="(default: %(default)s)",
         )
         subparser.add_argument(
-            "--quality-factor",
+            "--quality",
             type=list_filters.parse_optional_float,
             default="none",
             help="(default: %(default)s)",
