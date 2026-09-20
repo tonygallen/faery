@@ -1,6 +1,8 @@
 import collections.abc
 import dataclasses
 import pathlib
+import struct
+import sys
 import time
 import typing
 
@@ -94,6 +96,62 @@ class FrameOutput(typing.Generic[OutputState]):
         """
         # Pass the frame stream and frame rate to Rust
         gui.run_frame_viewer_from_iterator(self, frame_rate)
+
+    def to_stdout_raw(
+        self,
+        on_progress: typing.Callable[[OutputState], None] = lambda _: None,
+    ) -> None:
+        """
+        Write raw RGB frames to stdout for consumption by an external process
+        (e.g. a GStreamer appsrc element).
+
+        Each frame is preceded by an 8-byte little-endian uint64 giving the
+        frame's Presentation Timestamp (PTS) in **nanoseconds**.  The consumer
+        must read this header before each frame and pass the value to
+        ``gst_buffer_set_pts()`` (or ``GstBuffer.pts`` in Python GStreamer) so
+        that GStreamer can schedule frames correctly.
+
+        Wire format per frame (repeated for every frame)::
+
+            [8 bytes: PTS in nanoseconds, unsigned 64-bit little-endian]
+            [width * height * 3 bytes: RGB pixel data, row-major]
+
+        Example GStreamer appsrc consumer (Python)::
+
+            import struct
+            import gi
+            gi.require_version("Gst", "1.0")
+            gi.require_version("GstApp", "1.0")
+            from gi.repository import Gst, GstApp
+
+            PTS_HEADER = 8
+            FRAME_BYTES = width * height * 3
+
+            while True:
+                hdr = pipe.read(PTS_HEADER)
+                if len(hdr) < PTS_HEADER:
+                    break
+                pts_ns, = struct.unpack("<Q", hdr)
+                data = pipe.read(FRAME_BYTES)
+                if len(data) < FRAME_BYTES:
+                    break
+                buf = Gst.Buffer.new_wrapped(data)
+                buf.pts = pts_ns
+                appsrc.emit("push-buffer", buf)
+        """
+        state_manager = frame_stream_state.StateManager(
+            stream=self,
+            on_progress=on_progress,
+        )
+        state_manager.start()
+        for frame in self:
+            # frame.t.microseconds is in µs; GStreamer expects nanoseconds.
+            pts_ns = frame.t.microseconds * 1000
+            sys.stdout.buffer.write(struct.pack("<Q", pts_ns))
+            sys.stdout.buffer.write(frame.pixels[:, :, :3].tobytes())
+            sys.stdout.buffer.flush()
+            state_manager.commit(frame)
+        state_manager.end()
 
     def to_file(
         self,
