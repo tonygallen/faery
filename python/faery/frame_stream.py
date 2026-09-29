@@ -180,6 +180,36 @@ class FrameStream(
         ],
     ) -> "FrameStream": ...
 
+    def tee(
+        self,
+        n: int = 2,
+        maxsize: typing.Optional[int] = 100,
+        copy: bool = True,
+        overflow: stream.TeeOverflowConfig = "block",
+    ) -> stream.Tee["_TeedFrameStream"]:
+        """
+        Split the stream into independent, one-shot branches.
+
+        The default ``overflow="block"`` is lossless: with a bounded buffer,
+        the slowest blocking branch applies backpressure, so blocking branches
+        must be consumed concurrently. ``overflow="drop_oldest"`` keeps a
+        branch current by discarding its oldest unread frames when the buffer
+        fills. Policies may be supplied per branch. Branches that stop early
+        must be closed. ``copy=True`` gives each branch independent pixels;
+        ``copy=False`` shares read-only pixels in a branch-local Frame wrapper.
+
+        ``maxsize`` limits the number of retained frames, not their total byte
+        size. Each RGBA ``uint8`` frame has ``frame.pixels.nbytes`` bytes, equal
+        to ``width * height * 4``.
+        """
+        return _tee(
+            self,
+            n=n,
+            maxsize=maxsize,
+            copy=copy,
+            overflow=overflow,
+        )
+
 
 class FiniteFrameStream(
     stream.FiniteStream[Frame],
@@ -223,6 +253,22 @@ class FiniteFrameStream(
             [numpy.typing.NDArray[numpy.uint8]], numpy.typing.NDArray[numpy.uint8]
         ],
     ) -> "FiniteFrameStream": ...
+
+    def tee(
+        self,
+        n: int = 2,
+        maxsize: typing.Optional[int] = 100,
+        copy: bool = True,
+        overflow: stream.TeeOverflowConfig = "block",
+    ) -> stream.Tee["_TeedFiniteFrameStream"]:
+        """See :meth:`FrameStream.tee`."""
+        return _tee(
+            self,
+            n=n,
+            maxsize=maxsize,
+            copy=copy,
+            overflow=overflow,
+        )
 
 
 class RegularFrameStream(
@@ -269,6 +315,22 @@ class RegularFrameStream(
         ],
     ) -> "RegularFrameStream": ...
 
+    def tee(
+        self,
+        n: int = 2,
+        maxsize: typing.Optional[int] = 100,
+        copy: bool = True,
+        overflow: stream.TeeOverflowConfig = "block",
+    ) -> stream.Tee["_TeedRegularFrameStream"]:
+        """See :meth:`FrameStream.tee`."""
+        return _tee(
+            self,
+            n=n,
+            maxsize=maxsize,
+            copy=copy,
+            overflow=overflow,
+        )
+
 
 class FiniteRegularFrameStream(
     stream.FiniteRegularStream[Frame],
@@ -313,6 +375,22 @@ class FiniteRegularFrameStream(
             [numpy.typing.NDArray[numpy.uint8]], numpy.typing.NDArray[numpy.uint8]
         ],
     ) -> "FiniteRegularFrameStream": ...
+
+    def tee(
+        self,
+        n: int = 2,
+        maxsize: typing.Optional[int] = 100,
+        copy: bool = True,
+        overflow: stream.TeeOverflowConfig = "block",
+    ) -> stream.Tee["_TeedFiniteRegularFrameStream"]:
+        """See :meth:`FrameStream.tee`."""
+        return _tee(
+            self,
+            n=n,
+            maxsize=maxsize,
+            copy=copy,
+            overflow=overflow,
+        )
 
 
 def bind(prefix: typing.Literal["", "Finite", "Regular", "FiniteRegular"]):
@@ -560,3 +638,170 @@ class FiniteRegularFrameFilter(
     stream.FiniteRegularFilter[Frame],
 ):
     pass
+
+
+class _TeedFrameStreamMixin:
+    def __init__(
+        self,
+        tee_branch: stream._TeeBranch[Frame],
+        inner_dimensions: tuple[int, int],
+    ):
+        self._tee_branch = tee_branch
+        self._dimensions = inner_dimensions
+
+    def __iter__(self) -> collections.abc.Iterator[Frame]:
+        return iter(self._tee_branch)
+
+    def dimensions(self) -> tuple[int, int]:
+        return self._dimensions
+
+    def close(self) -> None:
+        """Unsubscribe this branch from its tee."""
+        self._tee_branch.close()
+
+
+class _TeedFrameStream(_TeedFrameStreamMixin, FrameStream):
+    pass
+
+
+class _TeedFiniteFrameStream(_TeedFrameStreamMixin, FiniteFrameStream):
+    def __init__(
+        self,
+        tee_branch: stream._TeeBranch[Frame],
+        inner_dimensions: tuple[int, int],
+        inner_time_range: tuple[timestamp.Time, timestamp.Time],
+    ):
+        _TeedFrameStreamMixin.__init__(
+            self,
+            tee_branch=tee_branch,
+            inner_dimensions=inner_dimensions,
+        )
+        self._time_range = inner_time_range
+
+    def time_range(self) -> tuple[timestamp.Time, timestamp.Time]:
+        return self._time_range
+
+
+class _TeedRegularFrameStream(_TeedFrameStreamMixin, RegularFrameStream):
+    def __init__(
+        self,
+        tee_branch: stream._TeeBranch[Frame],
+        inner_dimensions: tuple[int, int],
+        inner_frequency_hz: float,
+    ):
+        _TeedFrameStreamMixin.__init__(
+            self,
+            tee_branch=tee_branch,
+            inner_dimensions=inner_dimensions,
+        )
+        self._frequency_hz = inner_frequency_hz
+
+    def frequency_hz(self) -> float:
+        return self._frequency_hz
+
+
+class _TeedFiniteRegularFrameStream(_TeedFrameStreamMixin, FiniteRegularFrameStream):
+    def __init__(
+        self,
+        tee_branch: stream._TeeBranch[Frame],
+        inner_dimensions: tuple[int, int],
+        inner_time_range: tuple[timestamp.Time, timestamp.Time],
+        inner_frequency_hz: float,
+    ):
+        _TeedFrameStreamMixin.__init__(
+            self,
+            tee_branch=tee_branch,
+            inner_dimensions=inner_dimensions,
+        )
+        self._time_range = inner_time_range
+        self._frequency_hz = inner_frequency_hz
+
+    def time_range(self) -> tuple[timestamp.Time, timestamp.Time]:
+        return self._time_range
+
+    def frequency_hz(self) -> float:
+        return self._frequency_hz
+
+
+FrameStreamType = typing.TypeVar(
+    "FrameStreamType",
+    FrameStream,
+    FiniteFrameStream,
+    RegularFrameStream,
+    FiniteRegularFrameStream,
+)
+
+
+def _tee(
+    parent: FrameStreamType,
+    n: int,
+    maxsize: typing.Optional[int],
+    copy: bool,
+    overflow: stream.TeeOverflowConfig = "block",
+) -> stream.Tee[typing.Any]:
+    """Create type-preserving frame stream branches around the generic tee."""
+    if not isinstance(copy, bool):
+        raise ValueError("copy must be a bool")
+
+    def retain_item(frame: Frame) -> Frame:
+        return Frame(t=frame.t, pixels=frame.pixels.copy())
+
+    def copy_item(frame: Frame) -> Frame:
+        if copy:
+            pixels = frame.pixels.copy()
+        else:
+            pixels = frame.pixels.view()
+            pixels.setflags(write=False)
+        return Frame(t=frame.t, pixels=pixels)
+
+    tee_state, tee_branches = stream._tee(
+        parent=parent,
+        n=n,
+        maxsize=maxsize,
+        overflow=overflow,
+        retain_item=retain_item,
+        copy_item=copy_item,
+    )
+    inner_dimensions = parent.dimensions()
+
+    if isinstance(parent, FiniteRegularFrameStream):
+        inner_time_range = parent.time_range()
+        inner_frequency_hz = parent.frequency_hz()
+        branches = [
+            _TeedFiniteRegularFrameStream(
+                tee_branch=tee_branch,
+                inner_dimensions=inner_dimensions,
+                inner_time_range=inner_time_range,
+                inner_frequency_hz=inner_frequency_hz,
+            )
+            for tee_branch in tee_branches
+        ]
+    elif isinstance(parent, RegularFrameStream):
+        inner_frequency_hz = parent.frequency_hz()
+        branches = [
+            _TeedRegularFrameStream(
+                tee_branch=tee_branch,
+                inner_dimensions=inner_dimensions,
+                inner_frequency_hz=inner_frequency_hz,
+            )
+            for tee_branch in tee_branches
+        ]
+    elif isinstance(parent, FiniteFrameStream):
+        inner_time_range = parent.time_range()
+        branches = [
+            _TeedFiniteFrameStream(
+                tee_branch=tee_branch,
+                inner_dimensions=inner_dimensions,
+                inner_time_range=inner_time_range,
+            )
+            for tee_branch in tee_branches
+        ]
+    else:
+        branches = [
+            _TeedFrameStream(
+                tee_branch=tee_branch,
+                inner_dimensions=inner_dimensions,
+            )
+            for tee_branch in tee_branches
+        ]
+    return stream.Tee(branches=branches, state=tee_state)  # type: ignore
