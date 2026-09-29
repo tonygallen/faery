@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 
+mod accumulator;
 mod aedat;
 mod csv;
 mod dat;
@@ -21,6 +22,11 @@ mod utilities;
 #[pymodule]
 #[pyo3(name = "extension")]
 fn faery(python: Python<'_>, module: &pyo3::Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
+    {
+        let submodule = PyModule::new(python, "accumulator")?;
+        submodule.add_class::<accumulator::Accumulator>()?;
+        module.add_submodule(&submodule)?;
+    }
     {
         let submodule = PyModule::new(python, "aedat")?;
         submodule.add_class::<aedat::Decoder>()?;

@@ -1,7 +1,5 @@
 import collections.abc
 import pathlib
-import queue
-import threading
 import typing
 
 import numpy
@@ -275,25 +273,42 @@ class EventsStream(
     def tee(
         self,
         n: int = 2,
-        maxsize: int = 100,
-    ) -> list["EventsStream"]:
+        maxsize: typing.Optional[int] = 100,
+        copy: bool = True,
+        overflow: stream.TeeOverflowConfig = "block",
+    ) -> stream.Tee["_TeedEventsStream"]:
         """
-        Split the stream into n independent streams.
+        Split the stream into independent, one-shot branches.
 
-        Each output stream receives a copy of every events packet.
-        Works with infinite streams (e.g., cameras).
-
-        The streams are consumed by a background thread. Each consumer
-        should run in its own thread.
+        The default ``overflow="block"`` is lossless: with a bounded buffer,
+        the slowest blocking branch applies backpressure, so blocking branches
+        must be consumed concurrently. ``overflow="drop_oldest"`` keeps a
+        branch current by discarding its oldest unread packets when the buffer
+        fills. Policies may be supplied per branch. A branch that stops early
+        must be closed. By default each branch gets an independent packet;
+        ``copy=False`` returns read-only NumPy views and shares immutable byte
+        packets.
 
         Args:
-            n: Number of output streams to create. Defaults to 2.
-            maxsize: Maximum queue size per consumer. Blocks producer if full. Defaults to 100.
+            n: Number of branches. Must be at least 2.
+            maxsize: Maximum retained packets, or None for no bound. This is a
+                packet-count limit, not a byte limit. A NumPy event packet uses
+                13 bytes per event (``packet.nbytes`` in total).
+            copy: Copy mutable packets for each branch. Defaults to True.
+            overflow: ``"block"``, ``"drop_oldest"``, or one policy per
+                branch. Dropping requires a bounded ``maxsize``.
 
         Returns:
-            List of n stream objects that can be iterated independently.
+            An unpackable Tee collection that can also be closed or used as a
+            context manager.
         """
-        return _tee(self, n=n, maxsize=maxsize)
+        return _tee(
+            self,
+            n=n,
+            maxsize=maxsize,
+            copy=copy,
+            overflow=overflow,
+        )
 
     def apply(
         self, filter_class: type["EventsFilter"], *args, **kwargs
@@ -304,7 +319,7 @@ class EventsStream(
         self,
         decay: enums.Decay,
         tau: timestamp.TimeOrTimecode,
-        colormap: color.Colormap,
+        colormap: color.Colormap = color.colormaps.starry_night,
         minimum_clip: float = 0.0,
         maximum_clip: float = 0.99,
         gamma: float = 0.0,
@@ -378,24 +393,34 @@ class FiniteEventsStream(
     def tee(
         self,
         n: int = 2,
-        maxsize: int = 100,
-    ) -> list["FiniteEventsStream"]:
+        maxsize: typing.Optional[int] = 100,
+        copy: bool = True,
+        overflow: stream.TeeOverflowConfig = "block",
+    ) -> stream.Tee["_TeedFiniteEventsStream"]:
         """
         Split the stream into n independent streams.
 
-        Each output stream receives a copy of every events packet.
-
-        The streams are consumed by a background thread. Each consumer
-        should run in its own thread.
+        See :meth:`EventsStream.tee` for lifecycle and copying semantics.
 
         Args:
-            n: Number of output streams to create. Defaults to 2.
-            maxsize: Maximum queue size per consumer. Blocks producer if full. Defaults to 100.
+            n: Number of branches. Must be at least 2.
+            maxsize: Maximum retained packets, or None for no bound. This is a
+                packet-count limit, not a byte limit. A NumPy event packet uses
+                13 bytes per event (``packet.nbytes`` in total).
+            copy: Copy mutable packets for each branch. Defaults to True.
+            overflow: ``"block"``, ``"drop_oldest"``, or one policy per
+                branch.
 
         Returns:
-            List of n stream objects that can be iterated independently.
+            An unpackable, closeable Tee collection.
         """
-        return _tee(self, n=n, maxsize=maxsize)
+        return _tee(
+            self,
+            n=n,
+            maxsize=maxsize,
+            copy=copy,
+            overflow=overflow,
+        )
 
     def apply(
         self, filter_class: type["FiniteEventsFilter"], *args, **kwargs
@@ -424,7 +449,7 @@ class FiniteEventsStream(
         self,
         decay: enums.Decay,
         tau: timestamp.TimeOrTimecode,
-        colormap: color.Colormap,
+        colormap: color.Colormap = color.colormaps.starry_night,
         minimum_clip: float = 0.0,
         maximum_clip: float = 0.99,
         gamma: float = 0.0,
@@ -441,7 +466,6 @@ class FiniteEventsStream(
         ] = lambda opacities_gamma: opacities_gamma,
         on_progress: typing.Callable[[OutputState], None] = lambda _: None,
     ) -> "kinectograph.Kinectograph":
-
         from . import kinectograph
 
         return kinectograph.Kinectograph.from_events(
@@ -459,7 +483,6 @@ class FiniteEventsStream(
         samples: int = 1600,
         on_progress: typing.Callable[[OutputState], None] = lambda _: None,
     ) -> "event_rate.EventRate":
-
         from . import event_rate
 
         return event_rate.EventRate.from_events(
@@ -537,25 +560,34 @@ class RegularEventsStream(
     def tee(
         self,
         n: int = 2,
-        maxsize: int = 100,
-    ) -> list["RegularEventsStream"]:
+        maxsize: typing.Optional[int] = 100,
+        copy: bool = True,
+        overflow: stream.TeeOverflowConfig = "block",
+    ) -> stream.Tee["_TeedRegularEventsStream"]:
         """
         Split the stream into n independent streams.
 
-        Each output stream receives a copy of every events packet.
-        Works with infinite streams (e.g., cameras).
-
-        The streams are consumed by a background thread. Each consumer
-        should run in its own thread.
+        See :meth:`EventsStream.tee` for lifecycle and copying semantics.
 
         Args:
-            n: Number of output streams to create. Defaults to 2.
-            maxsize: Maximum queue size per consumer. Blocks producer if full. Defaults to 100.
+            n: Number of branches. Must be at least 2.
+            maxsize: Maximum retained packets, or None for no bound. This is a
+                packet-count limit, not a byte limit. A NumPy event packet uses
+                13 bytes per event (``packet.nbytes`` in total).
+            copy: Copy mutable packets for each branch. Defaults to True.
+            overflow: ``"block"``, ``"drop_oldest"``, or one policy per
+                branch.
 
         Returns:
-            List of n stream objects that can be iterated independently.
+            An unpackable, closeable Tee collection.
         """
-        return _tee(self, n=n, maxsize=maxsize)
+        return _tee(
+            self,
+            n=n,
+            maxsize=maxsize,
+            copy=copy,
+            overflow=overflow,
+        )
 
     def apply(
         self, filter_class: type["RegularEventsFilter"], *args, **kwargs
@@ -566,11 +598,26 @@ class RegularEventsStream(
         self,
         decay: enums.Decay,
         tau: timestamp.TimeOrTimecode,
-        colormap: color.Colormap,
+        colormap: color.Colormap = color.colormaps.starry_night,
         minimum_clip: float = 0.0,
         maximum_clip: float = 0.99,
         gamma: float = 0.0,
     ) -> frame_stream.RegularFrameStream: ...
+
+    def accumulate(
+        self,
+        decay: enums.AccumulatorDecay = "exponential",
+        decay_param: float = 1_000_000.0,
+        min_potential: float = 0.0,
+        max_potential: float = 1.0,
+        neutral_potential: float = 0.5,
+        event_contribution: float = 0.15,
+        ignore_polarity: bool = False,
+        synchronous_decay: bool = False,
+        colormap: color.Colormap = color.colormaps.starry_night,
+    ) -> frame_stream.RegularFrameStream:
+        """Accumulate events into persistent per-pixel potential frames."""
+        ...
 
 
 class FiniteRegularEventsStream(
@@ -636,24 +683,34 @@ class FiniteRegularEventsStream(
     def tee(
         self,
         n: int = 2,
-        maxsize: int = 100,
-    ) -> list["FiniteRegularEventsStream"]:
+        maxsize: typing.Optional[int] = 100,
+        copy: bool = True,
+        overflow: stream.TeeOverflowConfig = "block",
+    ) -> stream.Tee["_TeedFiniteRegularEventsStream"]:
         """
         Split the stream into n independent streams.
 
-        Each output stream receives a copy of every events packet.
-
-        The streams are consumed by a background thread. Each consumer
-        should run in its own thread.
+        See :meth:`EventsStream.tee` for lifecycle and copying semantics.
 
         Args:
-            n: Number of output streams to create. Defaults to 2.
-            maxsize: Maximum queue size per consumer. Blocks producer if full. Defaults to 100.
+            n: Number of branches. Must be at least 2.
+            maxsize: Maximum retained packets, or None for no bound. This is a
+                packet-count limit, not a byte limit. A NumPy event packet uses
+                13 bytes per event (``packet.nbytes`` in total).
+            copy: Copy mutable packets for each branch. Defaults to True.
+            overflow: ``"block"``, ``"drop_oldest"``, or one policy per
+                branch.
 
         Returns:
-            List of n stream objects that can be iterated independently.
+            An unpackable, closeable Tee collection.
         """
-        return _tee(self, n=n, maxsize=maxsize)
+        return _tee(
+            self,
+            n=n,
+            maxsize=maxsize,
+            copy=copy,
+            overflow=overflow,
+        )
 
     def apply(
         self, filter_class: type["FiniteRegularEventsFilter"], *args, **kwargs
@@ -682,11 +739,26 @@ class FiniteRegularEventsStream(
         self,
         decay: enums.Decay,
         tau: timestamp.TimeOrTimecode,
-        colormap: color.Colormap, #  TODO: This should have a default imo
+        colormap: color.Colormap = color.colormaps.starry_night,
         minimum_clip: float = 0.0,
         maximum_clip: float = 0.99,
         gamma: float = 0.0,
     ) -> frame_stream.FiniteRegularFrameStream: ...
+
+    def accumulate(
+        self,
+        decay: enums.AccumulatorDecay = "exponential",
+        decay_param: float = 1_000_000.0,
+        min_potential: float = 0.0,
+        max_potential: float = 1.0,
+        neutral_potential: float = 0.5,
+        event_contribution: float = 0.15,
+        ignore_polarity: bool = False,
+        synchronous_decay: bool = False,
+        colormap: color.Colormap = color.colormaps.starry_night,
+    ) -> frame_stream.FiniteRegularFrameStream:
+        """Accumulate events into persistent per-pixel potential frames."""
+        ...
 
     def to_kinectograph(
         self,
@@ -699,7 +771,6 @@ class FiniteRegularEventsStream(
         ] = lambda opacities_gamma: opacities_gamma,
         on_progress: typing.Callable[[OutputState], None] = lambda _: None,
     ) -> "kinectograph.Kinectograph":
-
         from . import kinectograph
 
         return kinectograph.Kinectograph.from_events(
@@ -717,7 +788,6 @@ class FiniteRegularEventsStream(
         samples: int = 1600,
         on_progress: typing.Callable[[OutputState], None] = lambda _: None,
     ) -> "event_rate.EventRate":
-
         from . import event_rate
 
         return event_rate.EventRate.from_events(
@@ -893,7 +963,7 @@ def bind(prefix: typing.Literal["", "Finite", "Regular", "FiniteRegular"]):
         self,
         decay: enums.Decay,
         tau: timestamp.TimeOrTimecode,
-        colormap: color.Colormap,
+        colormap: color.Colormap = color.colormaps.starry_night,
         minimum_clip: float = 0.0,
         maximum_clip: float = 0.99,
         gamma: float = 0.0,
@@ -909,6 +979,38 @@ def bind(prefix: typing.Literal["", "Finite", "Regular", "FiniteRegular"]):
             maximum_clip=maximum_clip,
             gamma=gamma,
         )
+
+    if prefix in {"Regular", "FiniteRegular"}:
+
+        def accumulate(
+            self,
+            decay: enums.AccumulatorDecay = "exponential",
+            decay_param: float = 1_000_000.0,
+            min_potential: float = 0.0,
+            max_potential: float = 1.0,
+            neutral_potential: float = 0.5,
+            event_contribution: float = 0.15,
+            ignore_polarity: bool = False,
+            synchronous_decay: bool = False,
+            colormap: color.Colormap = color.colormaps.starry_night,
+        ):
+            from .events_accumulator import FILTERS
+
+            return FILTERS[f"{prefix}Accumulate"](
+                parent=self,
+                decay=decay,
+                decay_param=decay_param,
+                min_potential=min_potential,
+                max_potential=max_potential,
+                neutral_potential=neutral_potential,
+                event_contribution=event_contribution,
+                ignore_polarity=ignore_polarity,
+                synchronous_decay=synchronous_decay,
+                colormap=colormap,
+            )
+
+        accumulate.filter_return_annotation = f"{prefix}FrameStream"
+        globals()[f"{prefix}EventsStream"].accumulate = accumulate
 
     regularize.filter_return_annotation = f"{regularize_prefix}EventsStream"
     chunks.filter_return_annotation = f"{unregularize_prefix}EventsStream"
@@ -995,106 +1097,81 @@ class FiniteRegularEventsFilter(
     pass
 
 
-class _TeedEventsStream(EventsStream):
-    """A teed stream that receives events from a queue."""
-
+class _TeedEventsStreamMixin:
     def __init__(
         self,
-        q: queue.Queue[typing.Optional[numpy.ndarray]],
+        tee_branch: stream._TeeBranch[typing.Any],
         inner_dimensions: tuple[int, int],
     ):
-        self._queue = q
+        self._tee_branch = tee_branch
         self._dimensions = inner_dimensions
 
     def __iter__(self) -> collections.abc.Iterator[numpy.ndarray]:
-        while True:
-            events = self._queue.get()
-            if events is None:
-                break
-            yield events
+        return iter(self._tee_branch)
 
     def dimensions(self) -> tuple[int, int]:
         return self._dimensions
 
+    def close(self) -> None:
+        """Unsubscribe this branch from its tee."""
+        self._tee_branch.close()
 
-class _TeedFiniteEventsStream(FiniteEventsStream):
-    """A teed stream that receives events from a queue."""
 
+class _TeedEventsStream(_TeedEventsStreamMixin, EventsStream):
+    pass
+
+
+class _TeedFiniteEventsStream(_TeedEventsStreamMixin, FiniteEventsStream):
     def __init__(
         self,
-        q: queue.Queue[typing.Optional[numpy.ndarray]],
+        tee_branch: stream._TeeBranch[typing.Any],
         inner_dimensions: tuple[int, int],
         inner_time_range: tuple[timestamp.Time, timestamp.Time],
     ):
-        self._queue = q
-        self._dimensions = inner_dimensions
+        _TeedEventsStreamMixin.__init__(
+            self,
+            tee_branch=tee_branch,
+            inner_dimensions=inner_dimensions,
+        )
         self._time_range = inner_time_range
-
-    def __iter__(self) -> collections.abc.Iterator[numpy.ndarray]:
-        while True:
-            events = self._queue.get()
-            if events is None:
-                break
-            yield events
-
-    def dimensions(self) -> tuple[int, int]:
-        return self._dimensions
 
     def time_range(self) -> tuple[timestamp.Time, timestamp.Time]:
         return self._time_range
 
 
-class _TeedRegularEventsStream(RegularEventsStream):
-    """A teed stream that receives events from a queue."""
-
+class _TeedRegularEventsStream(_TeedEventsStreamMixin, RegularEventsStream):
     def __init__(
         self,
-        q: queue.Queue[typing.Optional[numpy.ndarray]],
+        tee_branch: stream._TeeBranch[typing.Any],
         inner_dimensions: tuple[int, int],
         inner_frequency_hz: float,
     ):
-        self._queue = q
-        self._dimensions = inner_dimensions
+        _TeedEventsStreamMixin.__init__(
+            self,
+            tee_branch=tee_branch,
+            inner_dimensions=inner_dimensions,
+        )
         self._frequency_hz = inner_frequency_hz
-
-    def __iter__(self) -> collections.abc.Iterator[numpy.ndarray]:
-        while True:
-            events = self._queue.get()
-            if events is None:
-                break
-            yield events
-
-    def dimensions(self) -> tuple[int, int]:
-        return self._dimensions
 
     def frequency_hz(self) -> float:
         return self._frequency_hz
 
 
-class _TeedFiniteRegularEventsStream(FiniteRegularEventsStream):
-    """A teed stream that receives events from a queue."""
-
+class _TeedFiniteRegularEventsStream(_TeedEventsStreamMixin, FiniteRegularEventsStream):
     def __init__(
         self,
-        q: queue.Queue[typing.Optional[numpy.ndarray]],
+        tee_branch: stream._TeeBranch[typing.Any],
         inner_dimensions: tuple[int, int],
         inner_time_range: tuple[timestamp.Time, timestamp.Time],
         inner_frequency_hz: float,
     ):
-        self._queue = q
-        self._dimensions = inner_dimensions
+        _TeedEventsStreamMixin.__init__(
+            self,
+            tee_branch=tee_branch,
+            inner_dimensions=inner_dimensions,
+        )
         self._time_range = inner_time_range
         self._frequency_hz = inner_frequency_hz
-
-    def __iter__(self) -> collections.abc.Iterator[numpy.ndarray]:
-        while True:
-            events = self._queue.get()
-            if events is None:
-                break
-            yield events
-
-    def dimensions(self) -> tuple[int, int]:
-        return self._dimensions
 
     def time_range(self) -> tuple[timestamp.Time, timestamp.Time]:
         return self._time_range
@@ -1115,62 +1192,80 @@ StreamType = typing.TypeVar(
 def _tee(
     parent: StreamType,
     n: int,
-    maxsize: int,
-) -> list[StreamType]:
-    """
-    Internal implementation of stream tee.
-    """
-    queues: list[queue.Queue[typing.Optional[numpy.ndarray]]] = [
-        queue.Queue(maxsize=maxsize) for _ in range(n)
-    ]
+    maxsize: typing.Optional[int],
+    copy: bool,
+    overflow: stream.TeeOverflowConfig = "block",
+) -> stream.Tee[typing.Any]:
+    """Create type-preserving event stream branches around the generic tee."""
+    if not isinstance(copy, bool):
+        raise ValueError("copy must be a bool")
+
+    def retain_item(packet: typing.Any) -> typing.Any:
+        if isinstance(packet, bytes):
+            return packet
+        return packet.copy()
+
+    def copy_item(packet: typing.Any) -> typing.Any:
+        if isinstance(packet, bytes):
+            return packet
+        if copy:
+            return packet.copy()
+        if isinstance(packet, numpy.ndarray):
+            view = packet.view()
+            view.setflags(write=False)
+            return view
+        return packet
+
+    tee_state, tee_branches = stream._tee(
+        parent=parent,
+        n=n,
+        maxsize=maxsize,
+        overflow=overflow,
+        retain_item=retain_item,
+        copy_item=copy_item,
+    )
     inner_dimensions = parent.dimensions()
 
-    def producer():
-        try:
-            for events in parent:
-                for q in queues:
-                    q.put(events.copy())
-        finally:
-            for q in queues:
-                q.put(None)
-
-    thread = threading.Thread(target=producer, daemon=True)
-    thread.start()
-
     if isinstance(parent, FiniteRegularEventsStream):
-        return [
+        inner_time_range = parent.time_range()
+        inner_frequency_hz = parent.frequency_hz()
+        branches = [
             _TeedFiniteRegularEventsStream(
-                q=q,
+                tee_branch=tee_branch,
                 inner_dimensions=inner_dimensions,
-                inner_time_range=parent.time_range(),
-                inner_frequency_hz=parent.frequency_hz(),
+                inner_time_range=inner_time_range,
+                inner_frequency_hz=inner_frequency_hz,
             )
-            for q in queues
-        ]  # type: ignore
+            for tee_branch in tee_branches
+        ]
     elif isinstance(parent, RegularEventsStream):
-        return [
+        # RegularEventsStream intentionally gets frequency_hz from its concrete
+        # source/filter MRO rather than declaring it on the public category.
+        inner_frequency_hz = parent.frequency_hz()  # type: ignore
+        branches = [
             _TeedRegularEventsStream(
-                q=q,
+                tee_branch=tee_branch,
                 inner_dimensions=inner_dimensions,
-                inner_frequency_hz=parent.frequency_hz(),
+                inner_frequency_hz=inner_frequency_hz,
             )
-            for q in queues
-        ]  # type: ignore
+            for tee_branch in tee_branches
+        ]
     elif isinstance(parent, FiniteEventsStream):
-        return [
+        inner_time_range = parent.time_range()
+        branches = [
             _TeedFiniteEventsStream(
-                q=q,
+                tee_branch=tee_branch,
                 inner_dimensions=inner_dimensions,
-                inner_time_range=parent.time_range(),
+                inner_time_range=inner_time_range,
             )
-            for q in queues
-        ]  # type: ignore
+            for tee_branch in tee_branches
+        ]
     else:
-        return [
+        branches = [
             _TeedEventsStream(
-                q=q,
+                tee_branch=tee_branch,
                 inner_dimensions=inner_dimensions,
             )
-            for q in queues
-        ]  # type: ignore
-
+            for tee_branch in tee_branches
+        ]
+    return stream.Tee(branches=branches, state=tee_state)  # type: ignore

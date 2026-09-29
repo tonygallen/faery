@@ -25,12 +25,14 @@ from .display import (
     format_color as format_color,
 )
 from .enums import (
+    AccumulatorDecay as AccumulatorDecay,
     ColorblindnessType as ColorblindnessType,
     Decay as Decay,
     EventsFileCompression as EventsFileCompression,
     EventsFileType as EventsFileType,
     EventsFileVersion as EventsFileVersion,
     FilterOrientation as FilterOrientation,
+    TeeOverflow as TeeOverflow,
     UdpFormat as UdpFormat,
     ImageFileCompressionLevel as ImageFileCompressionLevel,
     ImageFileType as ImageFileType,
@@ -85,6 +87,7 @@ from .frame_stream_state import (
     FiniteRegularFrameStreamState as FiniteRegularFrameStreamState,
     RegularFrameStreamState as RegularFrameStreamState,
 )
+from .stream import Tee as Tee
 from .file_decoder import CsvProperties as CsvProperties
 from .kinectograph import Kinectograph as Kinectograph
 from .task import (
@@ -105,6 +108,7 @@ from .wiggle import WiggleParameters as WiggleParameters
 
 if typing.TYPE_CHECKING:
     from .types import (
+        accumulator,  # type: ignore
         aedat,  # type: ignore
         csv,  # type: ignore
         dat,  # type: ignore
@@ -119,6 +123,7 @@ if typing.TYPE_CHECKING:
     )
 else:
     from .extension import (
+        accumulator,
         aedat,
         csv,
         dat,
@@ -171,12 +176,14 @@ __all__ = [
     "format_bold",
     "format_color",
     "ColorblindnessType",
+    "AccumulatorDecay",
     "Decay",
     "EventRate",
     "EventsFileCompression",
     "EventsFileType",
     "EventsFileVersion",
     "FilterOrientation",
+    "TeeOverflow",
     "UdpFormat",
     "ImageFileCompressionLevel",
     "ImageFileType",
@@ -219,6 +226,7 @@ __all__ = [
     "FiniteFrameStreamState",
     "FiniteRegularFrameStreamState",
     "RegularFrameStreamState",
+    "Tee",
     "CsvProperties",
     "dirname",
     "Task",
@@ -233,6 +241,7 @@ __all__ = [
     "s",
     "WiggleParameters",
     "aedat",
+    "accumulator",
     "csv",
     "dat",
     "es",

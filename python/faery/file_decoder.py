@@ -217,7 +217,17 @@ class Decoder(events_stream.FiniteEventsStream):
         if self.path is None:
             raise NotImplementedError()
         if self.time_range_cache is not None:
-            path_hash = self.time_range_cache.path_hash(path=self.path)
+            path_hash = hash(
+                (
+                    self.time_range_cache.path_hash(path=self.path),
+                    self.file_type,
+                    self.track_id,
+                    self.dimensions_fallback,
+                    self.version_fallback,
+                    self.t0.to_microseconds(),
+                    dataclasses.astuple(self.csv_properties),
+                )
+            )
             time_range = self.time_range_cache.get_time_range(
                 path=self.path, path_hash=path_hash
             )
@@ -225,13 +235,28 @@ class Decoder(events_stream.FiniteEventsStream):
                 return time_range
         else:
             path_hash = None
-        start: typing.Optional[int] = None
-        end: typing.Optional[int] = None
-        for events in self:
-            if len(events) > 0:
-                if start is None:
-                    start = events["t"][0]
-                end = events["t"][-1]
+        if self.file_type == "evt":
+            with evt.Decoder(
+                self.path,
+                self.dimensions_fallback,
+                self.version_fallback,  # type: ignore
+            ) as decoder:
+                native_time_range = decoder.time_range()
+            if native_time_range is None:
+                start = None
+                end = None
+            else:
+                start, native_end = native_time_range
+                end = native_end - 1
+        else:
+            start: typing.Optional[int] = None
+            end: typing.Optional[int] = None
+            for events in self:
+                if len(events) > 0:
+                    packet_start = int(events["t"].min())
+                    packet_end = int(events["t"].max())
+                    start = packet_start if start is None else min(start, packet_start)
+                    end = packet_end if end is None else max(end, packet_end)
         if start is None or end is None:
             time_range = (
                 timestamp.Time(microseconds=0),

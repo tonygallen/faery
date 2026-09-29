@@ -313,6 +313,7 @@ class PacketSlice(events_stream.FiniteRegularEventsFilter):  # type: ignore
             if index >= self.end:
                 break
             if offset is not None:
+                events = events.copy()
                 events["t"] -= offset
             yield events
 
@@ -470,32 +471,29 @@ class Transpose(events_stream.FiniteRegularEventsFilter):
     def __iter__(self) -> collections.abc.Iterator[numpy.ndarray]:
         dimensions = self.parent.dimensions()
         for events in self.parent:
+            transformed = events.copy()
             if self.action == "flip_left_right":
-                events["x"] = dimensions[0] - 1 - events["x"]
+                transformed["x"] = dimensions[0] - 1 - events["x"]
             elif self.action == "flip_bottom_top":
-                events["y"] = dimensions[1] - 1 - events["y"]
+                transformed["y"] = dimensions[1] - 1 - events["y"]
             elif self.action == "rotate_90_counterclockwise":
-                x = events["x"].copy()
-                events["x"] = dimensions[1] - 1 - events["y"]
-                events["y"] = x
+                transformed["x"] = dimensions[1] - 1 - events["y"]
+                transformed["y"] = events["x"]
             elif self.action == "rotate_180":
-                events["x"] = dimensions[0] - 1 - events["x"]
-                events["y"] = dimensions[1] - 1 - events["y"]
+                transformed["x"] = dimensions[0] - 1 - events["x"]
+                transformed["y"] = dimensions[1] - 1 - events["y"]
             elif self.action == "rotate_270_counterclockwise":
-                x = events["x"].copy()
-                events["x"] = events["y"]
-                events["y"] = dimensions[0] - 1 - x
+                transformed["x"] = events["y"]
+                transformed["y"] = dimensions[0] - 1 - events["x"]
             elif self.action == "flip_up_diagonal":
-                x = events["x"].copy()
-                events["x"] = events["y"]
-                events["y"] = x
+                transformed["x"] = events["y"]
+                transformed["y"] = events["x"]
             elif self.action == "flip_down_diagonal":
-                x = events["x"].copy()
-                events["x"] = dimensions[1] - 1 - events["y"]
-                events["y"] = dimensions[0] - 1 - x
+                transformed["x"] = dimensions[1] - 1 - events["y"]
+                transformed["y"] = dimensions[0] - 1 - events["x"]
             else:
                 raise Exception(f'unknown action "{self.action}"')
-            yield events
+            yield transformed
 
 
 @typed_filter({"", "Finite"})

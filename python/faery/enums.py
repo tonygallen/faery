@@ -3,6 +3,8 @@ import typing
 
 Decay = typing.Literal["exponential", "linear", "window", "cumulative"]
 
+AccumulatorDecay = typing.Literal["none", "linear", "exponential", "step"]
+
 TransposeAction = typing.Literal[
     "flip_left_right",
     "flip_bottom_top",
@@ -25,6 +27,8 @@ Spatial transformation that applies to events and frames
 """
 
 FilterOrientation = typing.Literal["row", "column"]
+
+TeeOverflow = typing.Literal["block", "drop_oldest"]
 
 EventsFileType = typing.Literal[
     "aedat",
@@ -97,6 +101,10 @@ VALIDATORS: dict[str, typing.Any] = {}
 
 def validate_decay(value: Decay) -> Decay:
     return VALIDATORS["validate_decay"](value)
+
+
+def validate_accumulator_decay(value: AccumulatorDecay) -> AccumulatorDecay:
+    return VALIDATORS["validate_accumulator_decay"](value)
 
 
 def validate_transpose_action(value: TransposeAction) -> TransposeAction:

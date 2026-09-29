@@ -63,6 +63,8 @@ class Render(frame_stream.FiniteRegularFrameStream):
             See `minimum_clip`, `maximum_clip`, and `gamma` for details on how to control the tone-mapping process.
         tau: Decay temporal parameter.
             The specific role of this parameter depends on the decay function.
+        colormap: Maps rendered values to RGBA colors. Defaults to
+            ``faery.colormaps.starry_night``.
         minimum_clip: Only used if the decay is "cumulative". Must be smaller than `maximum_clip` and in the range `[0, 1]`.
             Selects the tone-map minimum by computing `values[minimum_clip * len(values)]`,
             where `values` is a sorted array of cumulative decays.
@@ -80,7 +82,7 @@ class Render(frame_stream.FiniteRegularFrameStream):
         parent: stream.FiniteRegularStream[numpy.ndarray],
         decay: enums.Decay,
         tau: timestamp.TimeOrTimecode,
-        colormap: color_module.Colormap,
+        colormap: color_module.Colormap = color_module.colormaps.starry_night,
         minimum_clip: float = 0.0,
         maximum_clip: float = 0.99,
         gamma: float = 0.0,

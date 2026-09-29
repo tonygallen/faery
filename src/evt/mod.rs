@@ -69,6 +69,16 @@ impl Decoder {
         }
     }
 
+    /// Return the minimum and one-past-maximum polarity-event timestamps.
+    fn time_range(&self, python: Python<'_>) -> PyResult<Option<(u64, u64)>> {
+        match self.inner {
+            Some(ref decoder) => Ok(python.allow_threads(|| decoder.time_range())?),
+            None => Err(pyo3::exceptions::PyException::new_err(
+                "called time_range after __exit__",
+            )),
+        }
+    }
+
     fn __enter__(slf: Py<Self>) -> Py<Self> {
         slf
     }

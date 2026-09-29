@@ -120,12 +120,14 @@ class Scale(frame_stream.FiniteRegularFrameFilter):
                 int(round(parent_dimensions[1] * factor)),
             )
             for frame in self.parent:
-                frame.pixels = image.resize(
-                    frame=frame.pixels,
-                    new_dimensions=new_dimensions,
-                    sampling_filter=self.sampling_filter,
+                yield frame_stream.Frame(
+                    pixels=image.resize(
+                        frame=frame.pixels,
+                        new_dimensions=new_dimensions,
+                        sampling_filter=self.sampling_filter,
+                    ),
+                    t=frame.t,
                 )
-                yield frame
 
 
 @typed_filter({"", "Finite", "Regular", "FiniteRegular"})
@@ -148,15 +150,16 @@ class Annotate(frame_stream.FiniteRegularFrameFilter):
 
     def __iter__(self) -> collections.abc.Iterator[frame_stream.Frame]:
         for frame in self.parent:
+            pixels = frame.pixels.copy()
             image.annotate(
-                frame=frame.pixels,
+                frame=pixels,
                 text=self.text,
                 x=self.x,
                 y=self.y,
                 size=self.size,
                 color=self.color,
             )
-            yield frame
+            yield frame_stream.Frame(pixels=pixels, t=frame.t)
 
 
 @typed_filter({"", "Finite"})
@@ -177,15 +180,16 @@ class AddTimecode(frame_stream.RegularFrameFilter):
 
     def __iter__(self) -> collections.abc.Iterator[frame_stream.Frame]:
         for frame in self.parent:
+            pixels = frame.pixels.copy()
             image.annotate(
-                frame=frame.pixels,
+                frame=pixels,
                 text=frame.t.to_timecode(),
                 x=self.x,
                 y=self.y,
                 size=self.size,
                 color=self.color,
             )
-            yield frame
+            yield frame_stream.Frame(pixels=pixels, t=frame.t)
 
 
 @typed_filter({"Regular", "FiniteRegular"})
@@ -225,8 +229,9 @@ class AddTimecodeAndSpeedup(frame_stream.FiniteRegularFrameFilter):
         else:
             speedup_label = None
         for frame in self.parent:
+            pixels = frame.pixels.copy()
             image.annotate(
-                frame=frame.pixels,
+                frame=pixels,
                 text=frame.t.to_timecode(),
                 x=self.x,
                 y=self.y,
@@ -235,14 +240,14 @@ class AddTimecodeAndSpeedup(frame_stream.FiniteRegularFrameFilter):
             )
             if speedup_label is not None:
                 image.annotate(
-                    frame=frame.pixels,
+                    frame=pixels,
                     text=speedup_label,
                     x=self.x,
                     y=self.y + round(self.size * 1.2),
                     size=self.size,
                     color=self.color,
                 )
-            yield frame
+            yield frame_stream.Frame(pixels=pixels, t=frame.t)
 
 
 @typed_filter({"", "Finite", "Regular", "FiniteRegular"})
@@ -270,8 +275,9 @@ class AddOverlay(frame_stream.FiniteRegularFrameFilter):
         else:
             overlay = self.overlay
         for frame in self.parent:
+            pixels = frame.pixels.copy()
             image.overlay(
-                frame=frame.pixels,
+                frame=pixels,
                 overlay=overlay,
                 x=self.x,
                 y=self.y,
@@ -281,7 +287,7 @@ class AddOverlay(frame_stream.FiniteRegularFrameFilter):
                 ),
                 sampling_filter=self.scale_sampling_filter,
             )
-            yield frame
+            yield frame_stream.Frame(pixels=pixels, t=frame.t)
 
 
 @typed_filter({"", "Finite", "Regular", "FiniteRegular"})

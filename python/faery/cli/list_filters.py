@@ -157,6 +157,14 @@ def parse_optional_int(string: str) -> typing.Optional[int]:
     return int(string)
 
 
+def parse_optional_colormap(value: typing.Any) -> typing.Optional[faery.Colormap]:
+    if value is None or isinstance(value, faery.Colormap):
+        return value
+    if value in NONE_KEYWORDS:
+        return None
+    return name_to_colormaps[value]
+
+
 def parse_udp(
     string: str,
 ) -> typing.Union[
@@ -270,16 +278,15 @@ def class_to_name_to_filter() -> dict[typing.Any, dict[str, Filter]]:
                             )
                         )
                     else:
-                        argparse_flag = (
-                            f"--{'no-' if parameter.default else ''}{parameter_name}"
-                        )
+                        prefix = "no-" if parameter.default else ""
+                        argparse_flag = f"--{prefix}{parameter_name.replace('_', '-')}"
                         filter.parameters.append(
                             Parameter(
                                 parameter_name=parameter_name,
                                 argparse_flag=argparse_flag,
                                 representation="{}{}{}".format(
                                     format_color(f"[", PUNCTUATION_COLOR),
-                                    format_color(parameter_name, LITERAL_COLOR),
+                                    format_color(argparse_flag, LITERAL_COLOR),
                                     format_color("]", PUNCTUATION_COLOR),
                                 ),
                                 options={
@@ -395,13 +402,17 @@ def class_to_name_to_filter() -> dict[typing.Any, dict[str, Filter]]:
                             transform=lambda value: value,
                         )
                     )
-                elif parameter.annotation in {faery.Colormap, "Colormap"}:
-                    options = {"choices": colormaps_names}
+                elif parameter.annotation in {faery.Colormap, "Colormap"} or (
+                    faery.Colormap in typing.get_args(parameter.annotation)
+                    and type(None) in typing.get_args(parameter.annotation)
+                ):
+                    optional = type(None) in typing.get_args(parameter.annotation)
+                    choices = colormaps_names + (["none"] if optional else [])
+                    options = {"choices": choices}
                     choices_representation = "{}{}{}".format(
                         format_color("{", PUNCTUATION_COLOR),
                         format_color(", ", PUNCTUATION_COLOR).join(
-                            format_color(choice, LITERAL_COLOR)
-                            for choice in colormaps_names
+                            format_color(choice, LITERAL_COLOR) for choice in choices
                         ),
                         format_color("}", PUNCTUATION_COLOR),
                     )
@@ -416,7 +427,12 @@ def class_to_name_to_filter() -> dict[typing.Any, dict[str, Filter]]:
                     else:
                         argparse_flag = f'--{parameter_name.replace("_", "-")}'
                         options["default"] = parameter.default
-                        options["help"] = "(default: %(default)s)"
+                        default_name = (
+                            parameter.default.name
+                            if isinstance(parameter.default, faery.Colormap)
+                            else parameter.default
+                        )
+                        options["help"] = f"(default: {default_name})"
                         options["dest"] = parameter_name
                         representation = "{}{} {} {} {}{}".format(
                             format_color("[", PUNCTUATION_COLOR),
@@ -424,11 +440,7 @@ def class_to_name_to_filter() -> dict[typing.Any, dict[str, Filter]]:
                             choices_representation,
                             format_color("=", PUNCTUATION_COLOR),
                             format_color(
-                                (
-                                    "none"
-                                    if parameter.default is None
-                                    else parameter.default
-                                ),
+                                ("none" if parameter.default is None else default_name),
                                 LITERAL_COLOR,
                             ),
                             format_color("]", PUNCTUATION_COLOR),
@@ -439,7 +451,7 @@ def class_to_name_to_filter() -> dict[typing.Any, dict[str, Filter]]:
                             argparse_flag=argparse_flag,
                             representation=representation,
                             options=options,
-                            transform=lambda value: name_to_colormaps[value],
+                            transform=parse_optional_colormap,
                         )
                     )
                 else:

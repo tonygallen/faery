@@ -1,5 +1,7 @@
 import collections.abc
+import ipaddress
 import socket
+import struct
 import threading
 import time
 import types
@@ -37,8 +39,27 @@ class Receiver:
             socket.AF_INET6 if ipv6 else socket.AF_INET,
             socket.SOCK_DGRAM,
         )
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.socket.settimeout(0.1)
-        self.socket.bind(address)
+        if ipaddress.ip_address(address[0]).is_multicast:
+            if ipv6:
+                self.socket.bind(("", address[1]))
+                mreq = struct.pack(
+                    "16sI",
+                    socket.inet_pton(socket.AF_INET6, address[0]),
+                    socket.INADDR_ANY,
+                )
+                self.socket.setsockopt(
+                    socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, mreq
+                )
+            else:
+                self.socket.bind(("", address[1]))
+                mreq = struct.pack(
+                    "4sl", socket.inet_aton(address[0]), socket.INADDR_ANY
+                )
+                self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        else:
+            self.socket.bind(address)
         self.buffer = bytearray(65536)
         self.queue: collections.deque[bytes] = collections.deque()
         self.running = True
@@ -63,7 +84,8 @@ class Receiver:
             try:
                 return self.queue.popleft()
             except IndexError:
-                time.sleep(0.02)
+                time.sleep(0.001)
+                # time.sleep(0.02)
 
 
 class Decoder(events_stream.EventsStream):

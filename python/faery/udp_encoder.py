@@ -1,5 +1,7 @@
 import collections.abc
+import ipaddress
 import socket
+import struct
 import typing
 
 import numpy
@@ -31,6 +33,11 @@ def encode(
         socket.AF_INET6 if ipv6 else socket.AF_INET,
         socket.SOCK_DGRAM,
     )
+    if ipaddress.ip_address(address[0]).is_multicast:
+        if ipv6:
+            udp_socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 2)
+        else:
+            udp_socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
     state_manager = events_stream_state.StateManager(
         stream=stream, on_progress=on_progress
     )
